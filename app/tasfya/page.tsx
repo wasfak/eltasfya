@@ -21,6 +21,7 @@ import { parsePurchases } from "@/lib/tasfya/purchases";
 import { parseStock } from "@/lib/tasfya/stock";
 import { computeReport } from "@/lib/tasfya/report";
 import { buildWorkbook } from "@/lib/tasfya/exportExcel";
+import { ProjectBar } from "@/components/tasfya/project-bar";
 import type { ReportRow, TasfyaResult } from "@/lib/tasfya/types";
 
 type CombinedRow = ReportRow & { isExtra: boolean };
@@ -104,6 +105,7 @@ const COLUMNS: {
     numeric: true,
     value: (r) => String(r.tasfya),
   },
+  { key: "bonus", label: "بونص", numeric: true, value: (r) => String(r.bonus) },
   {
     key: "supplier",
     label: "اسم المورد",
@@ -139,13 +141,15 @@ const COLUMNS: {
     numeric: true,
     value: (r) => String(r.specialPct),
   },
-  { key: "bonus", label: "بونص", numeric: true, value: (r) => String(r.bonus) },
 ];
 
 const COL_BY_KEY = Object.fromEntries(COLUMNS.map((c) => [c.key, c])) as Record<
   ColKey,
   (typeof COLUMNS)[number]
 >;
+
+/** Default ordering: always sort by اسم الصنف (item name) ascending. */
+const DEFAULT_SORT: { col: ColKey; dir: SortDir } = { col: "name", dir: "asc" };
 
 function pct(value: number) {
   if (!value) return "—";
@@ -169,10 +173,17 @@ export default function TasfyaPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // Currently loaded saved project (null = unsaved working state). `uploadKey`
+  // remounts the file inputs so "New" visually clears the chosen files.
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [uploadKey, setUploadKey] = useState(0);
+
   // Excel-style table state.
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Record<string, Set<string>>>({});
-  const [sort, setSort] = useState<{ col: ColKey; dir: SortDir } | null>(null);
+  const [sort, setSort] = useState<{ col: ColKey; dir: SortDir } | null>(
+    DEFAULT_SORT,
+  );
   const [menu, setMenu] = useState<{
     col: ColKey;
     x: number;
@@ -280,7 +291,10 @@ export default function TasfyaPage() {
     });
 
   // ---- Filter helpers (Excel-style dropdown) ----
-  const setColumnFilter = (col: ColKey, mutate: (allowed: Set<string>) => void) => {
+  const setColumnFilter = (
+    col: ColKey,
+    mutate: (allowed: Set<string>) => void,
+  ) => {
     setFilters((prev) => {
       const allowed = prev[col] ? new Set(prev[col]) : new Set(domains[col]);
       mutate(allowed);
@@ -317,6 +331,31 @@ export default function TasfyaPage() {
     setSettle(new Set());
   };
 
+  // Load a saved project's data into the view.
+  const applyProject = (
+    nextResult: TasfyaResult,
+    nextEdits: Record<string, string>,
+  ) => {
+    setResult(nextResult);
+    setEdits(nextEdits);
+    setError(null);
+    clearAll();
+    setSort(DEFAULT_SORT);
+  };
+
+  // Clear everything for a fresh upload (a new, unsaved project).
+  const newProject = () => {
+    setResult(null);
+    setEdits({});
+    setError(null);
+    setOrderFile(null);
+    setStockFile(null);
+    setPurchasesFile(null);
+    setUploadKey((k) => k + 1);
+    clearAll();
+    setSort(DEFAULT_SORT);
+  };
+
   const toggleSort = (col: ColKey) => {
     setSort((prev) => {
       if (!prev || prev.col !== col) return { col, dir: "asc" };
@@ -329,7 +368,8 @@ export default function TasfyaPage() {
   useEffect(() => {
     if (!menu) return;
     const onDown = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("[data-col-filter]")) setMenu(null);
+      if (!(e.target as HTMLElement).closest("[data-col-filter]"))
+        setMenu(null);
     };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(null);
     const onScroll = () => setMenu(null);
@@ -382,8 +422,9 @@ export default function TasfyaPage() {
       const purchases = parsePurchases(parseHtmlTable(purchasesHtml));
       setResult(computeReport(order, purchases, stock));
       setEdits({});
+      setCurrentId(null); // a freshly processed report is a new, unsaved project
       clearAll();
-      setSort(null);
+      setSort(DEFAULT_SORT);
     } catch {
       setError(
         "حدث خطأ أثناء معالجة الملفات. تأكد من أنها ملفات SofTech صحيحة.",
@@ -408,7 +449,7 @@ export default function TasfyaPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `tasfya-${result.orderNumber || "report"}.xlsx`;
+    a.download = `tasfya_${result.supplierCompany || "report"}.xlsx`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -433,7 +474,11 @@ export default function TasfyaPage() {
             onClick={handleProcess}
             disabled={!orderFile || !stockFile || !purchasesFile || loading}
           >
-            {loading ? <Loader2 className="animate-spin" /> : <FileSpreadsheet />}
+            {loading ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <FileSpreadsheet />
+            )}
             {loading ? "Processing..." : "Process"}
           </Button>
           {result && (
@@ -445,8 +490,17 @@ export default function TasfyaPage() {
         </div>
       </div>
 
+      <ProjectBar
+        result={result}
+        edits={edits}
+        currentId={currentId}
+        onCurrentIdChange={setCurrentId}
+        onApply={applyProject}
+        onNew={newProject}
+      />
+
       {/* Upload section — kept in Arabic as requested */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div key={uploadKey} className="grid gap-4 sm:grid-cols-3">
         <div className="space-y-2 rounded-xl border border-border p-4">
           <label className="text-sm font-medium">ملف أمر التوريد (HTML)</label>
           <input
@@ -592,8 +646,7 @@ export default function TasfyaPage() {
                             type="button"
                             aria-label={`Filter ${col.label}`}
                             onClick={(e) => {
-                              const r =
-                                e.currentTarget.getBoundingClientRect();
+                              const r = e.currentTarget.getBoundingClientRect();
                               setValSearch("");
                               setMenu((m) =>
                                 m?.col === col.key
@@ -630,7 +683,7 @@ export default function TasfyaPage() {
               <tbody>
                 {visibleRows.map((row) => (
                   <tr
-                    key={row.code}
+                    key={`${row.code}-${row.isExtra ? "extra" : "report"}`}
                     className={cn(
                       "border-b border-border/50 transition-colors last:border-0 hover:bg-muted/40",
                       rowClass(row.tasfya),
@@ -675,12 +728,23 @@ export default function TasfyaPage() {
                             [row.code]: e.target.value,
                           }))
                         }
+                        style={{
+                          // Grow with the value so big numbers (e.g. -10000)
+                          // aren't clipped; never narrower than ~4 chars.
+                          width: `calc(${Math.max(
+                            4,
+                            (edits[row.code] ?? String(row.tasfya)).length,
+                          )}ch + 4rem)`,
+                        }}
                         className={cn(
-                          "w-20 rounded-full border px-3 py-1.5 text-center font-bold tabular-nums outline-none transition focus:ring-2",
+                          "rounded-full border px-3 py-1.5 text-center font-bold tabular-nums outline-none transition focus:ring-2",
                           tasfyaPillClass(row.tasfya),
                         )}
                         aria-label={`Edit settlement for item ${row.code}`}
                       />
+                    </td>
+                    <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
+                      {row.bonus}
                     </td>
                     <td className="p-0 align-top text-center">
                       {row.lines.length === 0 ? (
@@ -746,9 +810,6 @@ export default function TasfyaPage() {
                         ))
                       )}
                     </td>
-                    <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
-                      {row.bonus}
-                    </td>
                   </tr>
                 ))}
                 {visibleRows.length === 0 && (
@@ -773,125 +834,136 @@ export default function TasfyaPage() {
           const spaceBelow = window.innerHeight - menu.bottom;
           const spaceAbove = menu.top;
           const openUp = spaceBelow < 320 && spaceAbove > spaceBelow;
-          const maxHeight = Math.max(180, (openUp ? spaceAbove : spaceBelow) - 16);
+          const maxHeight = Math.max(
+            180,
+            (openUp ? spaceAbove : spaceBelow) - 16,
+          );
           return (
-        <div
-          data-col-filter
-          style={
-            openUp
-              ? {
-                  position: "fixed",
-                  bottom: window.innerHeight - menu.top + 4,
-                  left: menu.x,
-                  maxHeight,
-                }
-              : { position: "fixed", top: menu.bottom + 4, left: menu.x, maxHeight }
-          }
-          className="z-50 flex w-72 flex-col overflow-hidden rounded-lg border border-border bg-card p-2 text-sm shadow-xl"
-        >
-          <div className="flex gap-1 pb-2">
-            <button
-              type="button"
-              onClick={() => {
-                setSort({ col: menu.col, dir: "asc" });
-                setMenu(null);
-              }}
-              className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 hover:bg-muted"
+            <div
+              data-col-filter
+              style={
+                openUp
+                  ? {
+                      position: "fixed",
+                      bottom: window.innerHeight - menu.top + 4,
+                      left: menu.x,
+                      maxHeight,
+                    }
+                  : {
+                      position: "fixed",
+                      top: menu.bottom + 4,
+                      left: menu.x,
+                      maxHeight,
+                    }
+              }
+              className="z-50 flex w-72 flex-col overflow-hidden rounded-lg border border-border bg-card p-2 text-sm shadow-xl"
             >
-              <ArrowUp className="size-3.5" /> Sort ascending
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSort({ col: menu.col, dir: "desc" });
-                setMenu(null);
-              }}
-              className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 hover:bg-muted"
-            >
-              <ArrowDown className="size-3.5" /> Sort descending
-            </button>
-          </div>
-
-          <div className="-mx-2 border-t border-border" />
-
-          <div className="relative pt-2">
-            <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
-              autoFocus
-              value={valSearch}
-              onChange={(e) => setValSearch(e.target.value)}
-              placeholder="Search values…"
-              className="h-8 w-full rounded-md border border-border bg-background pl-7 pr-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
-            />
-          </div>
-
-          <label className="mt-2 flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 font-medium hover:bg-muted">
-            <input
-              type="checkbox"
-              className="size-3.5 accent-primary"
-              checked={!!menuAllChecked}
-              ref={(el) => {
-                if (el)
-                  el.indeterminate =
-                    !menuAllChecked &&
-                    menuValues.some(
-                      (v) => !filters[menu.col] || filters[menu.col].has(v),
-                    );
-              }}
-              onChange={(e) => setAllValues(menu.col, menuValues, e.target.checked)}
-            />
-            <span>(Select all{valSearch ? " in search" : ""})</span>
-          </label>
-
-          <div className="min-h-0 flex-1 overflow-auto py-1">
-            {menuValues.length === 0 && (
-              <p className="px-2 py-3 text-center text-muted-foreground">
-                No matching values.
-              </p>
-            )}
-            {menuValues.map((v) => {
-              const checked = !filters[menu.col] || filters[menu.col].has(v);
-              return (
-                <label
-                  key={v}
-                  className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 hover:bg-muted"
+              <div className="flex gap-1 pb-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSort({ col: menu.col, dir: "asc" });
+                    setMenu(null);
+                  }}
+                  className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 hover:bg-muted"
                 >
-                  <input
-                    type="checkbox"
-                    className="size-3.5 accent-primary"
-                    checked={checked}
-                    onChange={() => toggleValue(menu.col, v)}
-                  />
-                  <span
-                    className={cn(
-                      "truncate",
-                      v === "" && "text-muted-foreground italic",
-                    )}
-                    title={fmt(menu.col, v)}
-                  >
-                    {fmt(menu.col, v)}
-                  </span>
-                </label>
-              );
-            })}
-          </div>
+                  <ArrowUp className="size-3.5" /> Sort ascending
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSort({ col: menu.col, dir: "desc" });
+                    setMenu(null);
+                  }}
+                  className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 hover:bg-muted"
+                >
+                  <ArrowDown className="size-3.5" /> Sort descending
+                </button>
+              </div>
 
-          <div className="-mx-2 border-t border-border" />
+              <div className="-mx-2 border-t border-border" />
 
-          <div className="flex items-center justify-between gap-2 pt-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => clearColumn(menu.col)}
-              disabled={!filters[menu.col]}
-            >
-              Clear filter
-            </Button>
-            <Button size="sm" onClick={() => setMenu(null)}>
-              <Check /> Done
-            </Button>
-          </div>
-        </div>
+              <div className="relative pt-2">
+                <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  autoFocus
+                  value={valSearch}
+                  onChange={(e) => setValSearch(e.target.value)}
+                  placeholder="Search values…"
+                  className="h-8 w-full rounded-md border border-border bg-background pl-7 pr-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
+                />
+              </div>
+
+              <label className="mt-2 flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 font-medium hover:bg-muted">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={!!menuAllChecked}
+                  ref={(el) => {
+                    if (el)
+                      el.indeterminate =
+                        !menuAllChecked &&
+                        menuValues.some(
+                          (v) => !filters[menu.col] || filters[menu.col].has(v),
+                        );
+                  }}
+                  onChange={(e) =>
+                    setAllValues(menu.col, menuValues, e.target.checked)
+                  }
+                />
+                <span>(Select all{valSearch ? " in search" : ""})</span>
+              </label>
+
+              <div className="min-h-0 flex-1 overflow-auto py-1">
+                {menuValues.length === 0 && (
+                  <p className="px-2 py-3 text-center text-muted-foreground">
+                    No matching values.
+                  </p>
+                )}
+                {menuValues.map((v) => {
+                  const checked =
+                    !filters[menu.col] || filters[menu.col].has(v);
+                  return (
+                    <label
+                      key={v}
+                      className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 hover:bg-muted"
+                    >
+                      <input
+                        type="checkbox"
+                        className="size-3.5 accent-primary"
+                        checked={checked}
+                        onChange={() => toggleValue(menu.col, v)}
+                      />
+                      <span
+                        className={cn(
+                          "truncate",
+                          v === "" && "text-muted-foreground italic",
+                        )}
+                        title={fmt(menu.col, v)}
+                      >
+                        {fmt(menu.col, v)}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <div className="-mx-2 border-t border-border" />
+
+              <div className="flex items-center justify-between gap-2 pt-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => clearColumn(menu.col)}
+                  disabled={!filters[menu.col]}
+                >
+                  Clear filter
+                </Button>
+                <Button size="sm" onClick={() => setMenu(null)}>
+                  <Check /> Done
+                </Button>
+              </div>
+            </div>
           );
         })()}
     </div>

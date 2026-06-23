@@ -6,6 +6,12 @@ function parseSofTechDate(value: string): Date {
   return new Date(y, m - 1, d);
 }
 
+/** Parses a SofTech numeric cell, stripping the thousands separators it adds
+ * to values ≥ 1000 (e.g. "1,000"), which would otherwise become NaN. */
+function toNumber(value: string): number {
+  return Number((value || "0").replace(/,/g, "")) || 0;
+}
+
 /**
  * Parses the "أمر توريد" (supply order) table.
  *
@@ -28,7 +34,7 @@ export function parseOrder(matrix: string[][]): OrderData {
     items.push({
       code: String(Number(code)),
       name: (row[14] ?? "").trim(),
-      order: Math.trunc(Number(row[7] || "0")),
+      order: Math.trunc(toNumber(row[7] ?? "")),
     });
   }
 

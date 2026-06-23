@@ -6,6 +6,12 @@ function parseSofTechDate(value: string): Date {
   return new Date(y, m - 1, d);
 }
 
+/** Parses a SofTech numeric cell, stripping the thousands separators it adds
+ * to values ≥ 1000 (e.g. "1,000"), which would otherwise become NaN. */
+function toNumber(value: string): number {
+  return Number((value || "0").replace(/,/g, "")) || 0;
+}
+
 /**
  * Parses the "سجل فواتير شراء الأصناف" (purchase invoices register) table.
  *
@@ -40,7 +46,7 @@ export function parsePurchases(matrix: string[][]): PurchaseLine[] {
       continue;
     }
 
-    const kmya = Number(row[10] || "0");
+    const kmya = toNumber(row[10] ?? "");
     if (!kmya) continue;
 
     lines.push({
@@ -50,9 +56,9 @@ export function parsePurchases(matrix: string[][]): PurchaseLine[] {
       invoice: (row[11] ?? "").trim(),
       date: parseSofTechDate((row[17] ?? "").trim()),
       kmya,
-      basicPct: Number(row[9] || "0"),
-      extraPct: Number(row[7] || "0"),
-      specialPct: Number(row[6] || "0"),
+      basicPct: toNumber(row[9] ?? ""),
+      extraPct: toNumber(row[7] ?? ""),
+      specialPct: toNumber(row[6] ?? ""),
     });
   }
 

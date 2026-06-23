@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import type { ExtraItem, ReportRow } from "./types";
+import type { ReportRow } from "./types";
 
 const YELLOW_FILL: ExcelJS.Fill = {
   type: "pattern",
@@ -21,80 +21,64 @@ const THIN_BORDER: Partial<ExcelJS.Borders> = {
   right: { style: "thin", color: { argb: "FFB0B0B0" } },
 };
 
-const REPORT_COLUMNS: { header: string; key: keyof ReportRow; width?: number }[] = [
-  { header: "كود الصنف", key: "code" },
-  { header: "اسم الصنف", key: "name", width: 50 },
-  { header: "اسم المورد", key: "supplier", width: 28 },
-  { header: "الكمية المطلوبة", key: "order" },
-  { header: "كمية الوارد", key: "received" },
-  { header: "أساسي %", key: "basicPct" },
-  { header: "إضافي %", key: "extraPct" },
-  { header: "خاص %", key: "specialPct" },
-  { header: "بونص", key: "bonus" },
-  { header: "التسوية", key: "tasfya" },
-];
+/**
+ * Rows passed to the export carry the full report shape, but only
+ * code / name / tasfya are written. `bonus` is read solely to decide row
+ * highlighting (it is not exported as a column).
+ */
+type ExportRow = Pick<ReportRow, "code" | "name" | "tasfya"> & { bonus?: number };
 
-const EXTRA_COLUMNS: { header: string; key: keyof ExtraItem; width?: number }[] = [
-  { header: "كود الصنف", key: "code" },
+/** The only exported columns, in left-to-right order. */
+const COLUMNS: { header: string; key: keyof ExportRow; width: number }[] = [
+  { header: "كود الصنف", key: "code", width: 16 },
   { header: "اسم الصنف", key: "name", width: 50 },
-  { header: "اسم المورد", key: "supplier", width: 28 },
-  { header: "كمية الوارد", key: "received" },
-  { header: "أساسي %", key: "basicPct" },
-  { header: "إضافي %", key: "extraPct" },
-  { header: "خاص %", key: "specialPct" },
-  { header: "بونص", key: "bonus" },
+  { header: "التسوية", key: "tasfya", width: 14 },
 ];
 
 const NAME_FLAGS = ["#C.C#", "#B#", "#NA#"];
 
-function addSheet<Row extends { name: string }>(
+function addSheet(
   workbook: ExcelJS.Workbook,
   sheetName: string,
-  columns: { header: string; key: keyof Row; width?: number }[],
-  rows: Row[]
+  rows: ExportRow[],
 ) {
   const sheet = workbook.addWorksheet(sheetName, {
-    views: [{ rightToLeft: true, state: "frozen", ySplit: 1 }],
+    // Left-to-right sheet (previously right-to-left).
+    views: [{ rightToLeft: false, state: "frozen", ySplit: 1 }],
   });
 
-  sheet.columns = columns.map((col) => ({
+  sheet.columns = COLUMNS.map((col) => ({
     header: col.header,
     key: String(col.key),
-    width: col.width ?? Math.max(10, col.header.length * 1.5),
+    width: col.width,
   }));
 
   for (const row of rows) {
-    sheet.addRow(row as Record<string, unknown>);
+    sheet.addRow({ code: row.code, name: row.name, tasfya: row.tasfya });
   }
 
   const headerRow = sheet.getRow(1);
   headerRow.font = { bold: true };
   headerRow.alignment = { horizontal: "center", vertical: "middle" };
-  for (let c = 1; c <= columns.length; c++) {
+  for (let c = 1; c <= COLUMNS.length; c++) {
     headerRow.getCell(c).border = THIN_BORDER;
   }
 
-  const nameColIndex = columns.findIndex((c) => c.key === "name") + 1;
-  const bonusColIndex = columns.findIndex((c) => c.key === "bonus") + 1;
-
-  sheet.eachRow((row, rowNumber) => {
-    if (rowNumber === 1) return;
+  // Data rows line up 1:1 with `rows` (header is row 1). Highlighting is decided
+  // from the source data, not the visible cells.
+  rows.forEach((src, i) => {
+    const row = sheet.getRow(i + 2);
     row.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
 
-    const name = String(row.getCell(nameColIndex).value ?? "");
-    const bonus = bonusColIndex
-      ? Number(row.getCell(bonusColIndex).value ?? 0)
-      : 0;
+    // Bonus rows (أساسي = 100%) take precedence, then flagged names.
+    const fill =
+      (src.bonus ?? 0) > 0
+        ? GREEN_FILL
+        : NAME_FLAGS.some((flag) => src.name.includes(flag))
+          ? YELLOW_FILL
+          : null;
 
-    // Bonus rows (أساسي = 100%) take precedence so they're easy to spot.
-    const fill = bonus > 0
-      ? GREEN_FILL
-      : NAME_FLAGS.some((flag) => name.includes(flag))
-        ? YELLOW_FILL
-        : null;
-
-    // Gridlines on every cell; fill only the flagged rows.
-    for (let c = 1; c <= columns.length; c++) {
+    for (let c = 1; c <= COLUMNS.length; c++) {
       const cell = row.getCell(c);
       cell.border = THIN_BORDER;
       if (fill) cell.fill = fill;
@@ -105,13 +89,13 @@ function addSheet<Row extends { name: string }>(
 }
 
 export async function buildWorkbook(
-  report: ReportRow[],
-  extraItems: ExtraItem[]
+  report: ExportRow[],
+  extraItems: ExportRow[],
 ): Promise<ArrayBuffer> {
   const workbook = new ExcelJS.Workbook();
 
-  addSheet(workbook, "Report", REPORT_COLUMNS, report);
-  addSheet(workbook, "Extra Items", EXTRA_COLUMNS, extraItems);
+  addSheet(workbook, "Report", report);
+  addSheet(workbook, "Extra Items", extraItems);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return buffer as ArrayBuffer;

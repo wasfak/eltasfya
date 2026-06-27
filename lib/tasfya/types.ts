@@ -63,6 +63,30 @@ export interface ExtraItem {
   lines: PurchaseDetail[];
 }
 
+/**
+ * A single aggregated item for the Review page: all purchase activity for one
+ * code, with the per-invoice breakdown. Mirrors the internal aggregate shape
+ * used by the settlement report, minus the order/settlement fields.
+ */
+export interface ReviewRow {
+  code: string;
+  name: string;
+  /** Distributor(s) the item was purchased from (إسم المورد), joined if several. */
+  supplier: string;
+  /** Total received quantity across all purchase lines (incl. bonus units). */
+  received: number;
+  /** أساسي discount % (quantity-weighted over non-bonus lines). */
+  basicPct: number;
+  /** إضافي discount %. */
+  extraPct: number;
+  /** خاص discount %. */
+  specialPct: number;
+  /** بونص: quantity received free (lines where أساسي = 100%). */
+  bonus: number;
+  /** Per-purchase-line breakdown (one entry per supplier/invoice). */
+  lines: PurchaseDetail[];
+}
+
 export interface OrderData {
   items: OrderItem[];
   referenceDate: Date;

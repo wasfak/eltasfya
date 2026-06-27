@@ -4,6 +4,7 @@ import type {
   PurchaseDetail,
   PurchaseLine,
   ReportRow,
+  ReviewRow,
   StockData,
   TasfyaResult,
 } from "./types";
@@ -140,6 +141,34 @@ function aggregateByCode(lines: PurchaseLine[]): Map<string, Aggregate> {
     });
   }
   return byCode;
+}
+
+/**
+ * Builds the Review view: every code's purchase activity (received, bonus,
+ * quantity-weighted discounts and the per-invoice breakdown), after applying
+ * the same reference-date rule as the settlement report. When `codes` is given,
+ * only those codes are returned — used to restrict the view to the codes listed
+ * in an uploaded Excel sheet. Results are sorted by item name.
+ */
+export function computeReview(
+  purchases: PurchaseLine[],
+  referenceDate: Date,
+  codes?: Set<string>
+): ReviewRow[] {
+  const normalized = normalizeByDate(purchases, referenceDate);
+  const aggregates = aggregateByCode(normalized);
+
+  const rows: ReviewRow[] = [];
+  for (const agg of aggregates.values()) {
+    if (codes && !codes.has(agg.code)) continue;
+    // Order each item's invoices chronologically so its buy history (and any
+    // discount change) reads oldest → newest. Dates are "YYYY/MM/DD", so a
+    // plain string compare is chronological.
+    agg.lines.sort((a, b) => a.date.localeCompare(b.date));
+    rows.push(agg);
+  }
+  rows.sort((a, b) => a.name.localeCompare(b.name, "ar", { numeric: true }));
+  return rows;
 }
 
 export function computeReport(

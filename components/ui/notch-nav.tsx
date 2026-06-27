@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import * as React from "react";
-import { Home, FileSpreadsheet } from "lucide-react";
+import { Home, FileSpreadsheet, ListChecks } from "lucide-react";
 
 import type { LucideIcon } from "lucide-react";
 
-type IconName = "home" | "tasfya";
+type IconName = "home" | "tasfya" | "review";
 
 type Item = {
   value: string;
@@ -67,6 +67,7 @@ export function NotchNav({
   const iconMap: Record<IconName, LucideIcon> = {
     home: Home,
     tasfya: FileSpreadsheet,
+    review: ListChecks,
   };
 
   const updateNotch = React.useCallback(() => {

@@ -8,10 +8,11 @@ const navItems: Array<{
   value: string;
   label: string;
   href: string;
-  icon: "home" | "tasfya";
+  icon: "home" | "tasfya" | "review";
 }> = [
   { value: "home", label: "Home", href: "/", icon: "home" },
   { value: "tasfya", label: "التسوية", href: "/tasfya", icon: "tasfya" },
+  { value: "review", label: "المراجعة", href: "/review", icon: "review" },
 ];
 
 export const metadata: Metadata = {

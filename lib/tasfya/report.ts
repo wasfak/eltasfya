@@ -1,6 +1,7 @@
 import type {
   ExtraItem,
   OrderData,
+  OrderItem,
   PurchaseDetail,
   PurchaseLine,
   ReportRow,
@@ -181,7 +182,26 @@ export function computeReport(
 
   const orderCodes = new Set(order.items.map((i) => i.code));
 
-  const report: ReportRow[] = order.items.map((item) => {
+  // A SofTech purchase order can list the same code on more than one line (e.g.
+  // a real order line plus a stray 0-quantity duplicate). Each report row is
+  // matched to the item's full by-code purchase aggregate, so emitting one row
+  // per order line would attribute the same received quantity to every
+  // duplicate — inventing a phantom surplus. Merge duplicates into one row,
+  // summing the ordered quantity and keeping the first line's name/position.
+  const mergedItems: OrderItem[] = [];
+  const itemByCode = new Map<string, OrderItem>();
+  for (const item of order.items) {
+    const existing = itemByCode.get(item.code);
+    if (existing) {
+      existing.order += item.order;
+    } else {
+      const copy = { ...item };
+      itemByCode.set(item.code, copy);
+      mergedItems.push(copy);
+    }
+  }
+
+  const report: ReportRow[] = mergedItems.map((item) => {
     const agg = aggregates.get(item.code);
     const received = agg?.received ?? 0;
     const bonus = agg?.bonus ?? 0;

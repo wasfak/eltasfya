@@ -1,17 +1,24 @@
 import ExcelJS from "exceljs";
 import type { ReportRow } from "./types";
 
-const YELLOW_FILL: ExcelJS.Fill = {
-  type: "pattern",
-  pattern: "solid",
-  fgColor: { argb: "FFFFFF00" },
-};
+/**
+ * Settlement (التسوية) color scheme, mirroring the on-screen table and using
+ * Excel's familiar Good / Neutral / Bad palette:
+ *   تسوية = 0  → green  (matched)
+ *   تسوية > 0  → yellow (surplus)
+ *   تسوية < 0  → red    (shortage)
+ */
+const SETTLE_STYLE = {
+  zero: { fill: "FFC6EFCE", font: "FF006100" }, // green
+  pos: { fill: "FFFFEB9C", font: "FF9C6500" }, // yellow
+  neg: { fill: "FFFFC7CE", font: "FF9C0006" }, // red
+} as const;
 
-const GREEN_FILL: ExcelJS.Fill = {
-  type: "pattern",
-  pattern: "solid",
-  fgColor: { argb: "FFC6EFCE" },
-};
+function settleStyle(tasfya: number) {
+  if (tasfya < 0) return SETTLE_STYLE.neg;
+  if (tasfya > 0) return SETTLE_STYLE.pos;
+  return SETTLE_STYLE.zero;
+}
 
 // Thin gridlines on every side of every cell.
 const THIN_BORDER: Partial<ExcelJS.Borders> = {
@@ -24,9 +31,10 @@ const THIN_BORDER: Partial<ExcelJS.Borders> = {
 /**
  * The export now mirrors the on-screen table: every visible column is written.
  * Rows carry the full report shape plus `isExtra` (to render الحالة and to blank
- * out the order column for over-order items). `bonus` also drives row
- * highlighting. The per-invoice line breakdown shown in the UI is flattened to
- * the item-level aggregate here (one row per item).
+ * out the order column for over-order items). `tasfya` drives row highlighting.
+ * The per-invoice line breakdown shown in the UI is flattened to the item-level
+ * aggregate here (one row per item), except اسم المورد which keeps one text line
+ * per invoice.
  */
 type ExportRow = Pick<
   ReportRow,
@@ -48,15 +56,22 @@ function pctOrBlank(value: number): number | string {
   return value ? Number(value.toFixed(2)) : "";
 }
 
-/** اسم المورد: prefer the joined aggregate, else the line suppliers (as in the UI). */
+/**
+ * اسم المورد: one text line per purchase line, each showing the supplier plus
+ * its invoice number and date (e.g. "فارما اوفر سيز — Inv. 684752 · 2026/06/22"),
+ * matching the per-invoice breakdown shown in the on-screen table. Falls back to
+ * the joined aggregate supplier when there are no lines.
+ */
 function supplierOf(r: ExportRow): string {
-  return (
-    r.supplier ||
-    r.lines
-      .map((l) => l.supplier)
-      .filter(Boolean)
-      .join(", ")
-  );
+  if (r.lines.length === 0) return r.supplier;
+  return r.lines
+    .map((l) => {
+      const meta = [l.invoice && `Inv. ${l.invoice}`, l.date]
+        .filter(Boolean)
+        .join(" · ");
+      return [l.supplier || "—", meta].filter(Boolean).join(" — ");
+    })
+    .join("\n");
 }
 
 /** The exported columns, in the same left-to-right order as the table. */
@@ -81,8 +96,6 @@ const COLUMNS: {
   { header: "إضافي %", width: 12, value: (r) => pctOrBlank(r.extraPct) },
   { header: "خاص %", width: 12, value: (r) => pctOrBlank(r.specialPct) },
 ];
-
-const NAME_FLAGS = ["#C.C#", "#B#", "#NA#"];
 
 function addSheet(
   workbook: ExcelJS.Workbook,
@@ -110,24 +123,24 @@ function addSheet(
     headerRow.getCell(c).border = THIN_BORDER;
   }
 
-  // Data rows line up 1:1 with `rows` (header is row 1). Highlighting is decided
-  // from the source data, not the visible cells.
+  // Data rows line up 1:1 with `rows` (header is row 1). The whole row is
+  // colored by its settlement value (green = 0, yellow > 0, red < 0).
   rows.forEach((src, i) => {
     const row = sheet.getRow(i + 2);
     row.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
 
-    // Bonus rows (أساسي = 100%) take precedence, then flagged names.
-    const fill =
-      (src.bonus ?? 0) > 0
-        ? GREEN_FILL
-        : NAME_FLAGS.some((flag) => src.name.includes(flag))
-          ? YELLOW_FILL
-          : null;
+    const style = settleStyle(src.tasfya);
+    const fill: ExcelJS.Fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: style.fill },
+    };
 
     for (let c = 1; c <= COLUMNS.length; c++) {
       const cell = row.getCell(c);
       cell.border = THIN_BORDER;
-      if (fill) cell.fill = fill;
+      cell.fill = fill;
+      cell.font = { color: { argb: style.font } };
     }
   });
 

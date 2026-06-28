@@ -22,6 +22,17 @@ function isBonus(line: PurchaseLine): boolean {
   return line.basicPct === 100;
 }
 
+/**
+ * بونص %: free (bonus) units as a percentage of the *paid* units
+ * (paid = received − bonus), i.e. the "X free per Y bought" deal rate. Returns 0
+ * when there is no bonus or nothing was paid for.
+ */
+export function bonusPercent(received: number, bonus: number): number {
+  const paid = received - bonus;
+  if (bonus <= 0 || paid <= 0) return 0;
+  return Math.round((bonus / paid) * 10000) / 100;
+}
+
 function daysBetween(a: Date, b: Date): number {
   return (a.getTime() - b.getTime()) / (1000 * 60 * 60 * 24);
 }

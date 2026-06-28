@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { bonusPercent } from "./report";
 import type { ReportRow } from "./types";
 
 /**
@@ -51,9 +52,24 @@ type ExportRow = Pick<
   | "lines"
 > & { isExtra?: boolean };
 
-/** A blank cell for a zero discount, matching the "—" shown in the table. */
-function pctOrBlank(value: number): number | string {
-  return value ? Number(value.toFixed(2)) : "";
+/** A percentage as shown in the table: "26.47%", or "—" when zero. */
+function pctText(value: number): string {
+  return value ? `${Number(value.toFixed(2))}%` : "—";
+}
+
+/**
+ * Renders one of the per-invoice columns (received / discounts) with one text
+ * line per purchase line, matching the on-screen breakdown. With no lines it
+ * falls back to the item-level aggregate via `whenEmpty`.
+ */
+function perLine(
+  r: ExportRow,
+  line: (l: ExportRow["lines"][number]) => string | number,
+  whenEmpty: string | number,
+): string | number {
+  if (r.lines.length === 0) return whenEmpty;
+  if (r.lines.length === 1) return line(r.lines[0]);
+  return r.lines.map(line).join("\n");
 }
 
 /**
@@ -90,11 +106,32 @@ const COLUMNS: {
   },
   { header: "التسوية", width: 14, value: (r) => r.tasfya },
   { header: "بونص", width: 10, value: (r) => r.bonus },
+  {
+    header: "بونص %",
+    width: 10,
+    value: (r) => pctText(bonusPercent(r.received, r.bonus)),
+  },
   { header: "اسم المورد", width: 32, value: (r) => supplierOf(r) },
-  { header: "كمية الوارد", width: 14, value: (r) => r.received },
-  { header: "أساسي %", width: 12, value: (r) => pctOrBlank(r.basicPct) },
-  { header: "إضافي %", width: 12, value: (r) => pctOrBlank(r.extraPct) },
-  { header: "خاص %", width: 12, value: (r) => pctOrBlank(r.specialPct) },
+  {
+    header: "كمية الوارد",
+    width: 14,
+    value: (r) => perLine(r, (l) => l.received, r.received),
+  },
+  {
+    header: "أساسي %",
+    width: 12,
+    value: (r) => perLine(r, (l) => pctText(l.basicPct), pctText(r.basicPct)),
+  },
+  {
+    header: "إضافي %",
+    width: 12,
+    value: (r) => perLine(r, (l) => pctText(l.extraPct), pctText(r.extraPct)),
+  },
+  {
+    header: "خاص %",
+    width: 12,
+    value: (r) => perLine(r, (l) => pctText(l.specialPct), pctText(r.specialPct)),
+  },
 ];
 
 function addSheet(

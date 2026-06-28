@@ -19,7 +19,7 @@ import { parseHtmlTable } from "@/lib/tasfya/parseTable";
 import { parseOrder } from "@/lib/tasfya/order";
 import { parsePurchases } from "@/lib/tasfya/purchases";
 import { parseStock } from "@/lib/tasfya/stock";
-import { computeReport } from "@/lib/tasfya/report";
+import { bonusPercent, computeReport } from "@/lib/tasfya/report";
 import { buildWorkbook } from "@/lib/tasfya/exportExcel";
 import { ProjectBar } from "@/components/tasfya/project-bar";
 import type { ReportRow, TasfyaResult } from "@/lib/tasfya/types";
@@ -38,6 +38,7 @@ type ColKey =
   | "extraPct"
   | "specialPct"
   | "bonus"
+  | "bonusPct"
   | "tasfya";
 
 const ENTRY =
@@ -106,6 +107,12 @@ const COLUMNS: {
     value: (r) => String(r.tasfya),
   },
   { key: "bonus", label: "بونص", numeric: true, value: (r) => String(r.bonus) },
+  {
+    key: "bonusPct",
+    label: "بونص %",
+    numeric: true,
+    value: (r) => String(bonusPercent(r.received, r.bonus)),
+  },
   {
     key: "supplier",
     label: "اسم المورد",
@@ -745,6 +752,9 @@ export default function TasfyaPage() {
                     </td>
                     <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
                       {row.bonus}
+                    </td>
+                    <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
+                      {pct(bonusPercent(row.received, row.bonus))}
                     </td>
                     <td className="p-0 align-top text-center">
                       {row.lines.length === 0 ? (

@@ -22,17 +22,64 @@ const THIN_BORDER: Partial<ExcelJS.Borders> = {
 };
 
 /**
- * Rows passed to the export carry the full report shape, but only
- * code / name / tasfya are written. `bonus` is read solely to decide row
- * highlighting (it is not exported as a column).
+ * The export now mirrors the on-screen table: every visible column is written.
+ * Rows carry the full report shape plus `isExtra` (to render الحالة and to blank
+ * out the order column for over-order items). `bonus` also drives row
+ * highlighting. The per-invoice line breakdown shown in the UI is flattened to
+ * the item-level aggregate here (one row per item).
  */
-type ExportRow = Pick<ReportRow, "code" | "name" | "tasfya"> & { bonus?: number };
+type ExportRow = Pick<
+  ReportRow,
+  | "code"
+  | "name"
+  | "supplier"
+  | "order"
+  | "received"
+  | "basicPct"
+  | "extraPct"
+  | "specialPct"
+  | "bonus"
+  | "tasfya"
+  | "lines"
+> & { isExtra?: boolean };
 
-/** The only exported columns, in left-to-right order. */
-const COLUMNS: { header: string; key: keyof ExportRow; width: number }[] = [
-  { header: "كود الصنف", key: "code", width: 16 },
-  { header: "اسم الصنف", key: "name", width: 50 },
-  { header: "التسوية", key: "tasfya", width: 14 },
+/** A blank cell for a zero discount, matching the "—" shown in the table. */
+function pctOrBlank(value: number): number | string {
+  return value ? Number(value.toFixed(2)) : "";
+}
+
+/** اسم المورد: prefer the joined aggregate, else the line suppliers (as in the UI). */
+function supplierOf(r: ExportRow): string {
+  return (
+    r.supplier ||
+    r.lines
+      .map((l) => l.supplier)
+      .filter(Boolean)
+      .join(", ")
+  );
+}
+
+/** The exported columns, in the same left-to-right order as the table. */
+const COLUMNS: {
+  header: string;
+  width: number;
+  value: (r: ExportRow) => string | number;
+}[] = [
+  { header: "كود الصنف", width: 16, value: (r) => r.code },
+  { header: "اسم الصنف", width: 50, value: (r) => r.name },
+  { header: "الحالة", width: 12, value: (r) => (r.isExtra ? "زائد" : "مطلوب") },
+  {
+    header: "الكمية المطلوبة",
+    width: 16,
+    value: (r) => (r.isExtra ? "" : r.order),
+  },
+  { header: "التسوية", width: 14, value: (r) => r.tasfya },
+  { header: "بونص", width: 10, value: (r) => r.bonus },
+  { header: "اسم المورد", width: 32, value: (r) => supplierOf(r) },
+  { header: "كمية الوارد", width: 14, value: (r) => r.received },
+  { header: "أساسي %", width: 12, value: (r) => pctOrBlank(r.basicPct) },
+  { header: "إضافي %", width: 12, value: (r) => pctOrBlank(r.extraPct) },
+  { header: "خاص %", width: 12, value: (r) => pctOrBlank(r.specialPct) },
 ];
 
 const NAME_FLAGS = ["#C.C#", "#B#", "#NA#"];
@@ -49,12 +96,11 @@ function addSheet(
 
   sheet.columns = COLUMNS.map((col) => ({
     header: col.header,
-    key: String(col.key),
     width: col.width,
   }));
 
   for (const row of rows) {
-    sheet.addRow({ code: row.code, name: row.name, tasfya: row.tasfya });
+    sheet.addRow(COLUMNS.map((col) => col.value(row)));
   }
 
   const headerRow = sheet.getRow(1);

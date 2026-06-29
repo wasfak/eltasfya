@@ -7,8 +7,10 @@ import {
   Check,
   FileSpreadsheet,
   Filter,
+  HardDrive,
   Loader2,
   Search,
+  Trash2,
   TrendingUp,
   X,
 } from "lucide-react";
@@ -18,7 +20,12 @@ import { parseHtmlTable } from "@/lib/tasfya/parseTable";
 import { parsePurchases } from "@/lib/tasfya/purchases";
 import { parseStock } from "@/lib/tasfya/stock";
 import { computeReview } from "@/lib/tasfya/report";
-import type { PurchaseDetail, ReviewRow } from "@/lib/tasfya/types";
+import {
+  savePurchases,
+  loadPurchases,
+  clearPurchases,
+} from "@/lib/tasfya/purchasesCache";
+import type { PurchaseDetail, PurchaseLine, ReviewRow } from "@/lib/tasfya/types";
 
 const ENTRY =
   "flex flex-col items-center justify-center text-center min-h-[2.75rem] px-3 border-b border-border/50 last:border-b-0";
@@ -198,6 +205,21 @@ export default function ReviewPage() {
   const [search, setSearch] = useState("");
   // Show only items whose أساسي/إضافي/خاص discount changed across invoices.
   const [showChanged, setShowChanged] = useState(false);
+
+  // Cached purchases from IndexedDB.
+  const [cachedPurchases, setCachedPurchases] = useState<{
+    fileName: string;
+    savedAt: number;
+    lines: PurchaseLine[];
+  } | null>(null);
+
+  useEffect(() => {
+    loadPurchases().then((data) => {
+      if (data) setCachedPurchases(data);
+    });
+  }, []);
+
+  const hasPurchases = !!purchasesFile || !!cachedPurchases;
 
   // Excel-style per-column filters (اسم المورد / أساسي %).
   const [filters, setFilters] = useState<Record<string, Set<string>>>({});
@@ -393,16 +415,26 @@ export default function ReviewPage() {
     menuValues.every((v) => !filters[menu.col] || filters[menu.col].has(v));
 
   async function handleProcess() {
-    if (!purchasesFile || !codesFile) return;
+    if (!hasPurchases || !codesFile) return;
     setLoading(true);
     setError(null);
     try {
-      const [purchasesHtml, codesHtml] = await Promise.all([
-        readFileAsText(purchasesFile),
-        readFileAsText(codesFile),
-      ]);
+      let purchases: PurchaseLine[];
 
-      const purchases = parsePurchases(parseHtmlTable(purchasesHtml));
+      if (purchasesFile) {
+        const purchasesHtml = await readFileAsText(purchasesFile);
+        purchases = parsePurchases(parseHtmlTable(purchasesHtml));
+        await savePurchases(purchasesFile.name, purchases);
+        setCachedPurchases({
+          fileName: purchasesFile.name,
+          savedAt: Date.now(),
+          lines: purchases,
+        });
+      } else {
+        purchases = cachedPurchases!.lines;
+      }
+
+      const codesHtml = await readFileAsText(codesFile);
       const stock = parseStock(parseHtmlTable(codesHtml));
       const codes = [...stock.codes];
 
@@ -495,7 +527,7 @@ export default function ReviewPage() {
         </div>
         <Button
           onClick={handleProcess}
-          disabled={!purchasesFile || !codesFile || loading}
+          disabled={!hasPurchases || !codesFile || loading}
         >
           {loading ? <Loader2 className="animate-spin" /> : <FileSpreadsheet />}
           {loading ? "Processing..." : "Process"}
@@ -514,6 +546,28 @@ export default function ReviewPage() {
             onChange={(e) => setPurchasesFile(e.target.files?.[0] ?? null)}
             className={fileInputClass}
           />
+          {!purchasesFile && cachedPurchases && (
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 px-3 py-1.5 text-xs dark:border-emerald-900 dark:bg-emerald-950/30">
+              <span className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-300">
+                <HardDrive className="size-3.5" />
+                محفوظ: {cachedPurchases.fileName}
+                <span className="text-emerald-600/70 dark:text-emerald-400/70">
+                  ({new Date(cachedPurchases.savedAt).toLocaleDateString("ar-EG")})
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={async () => {
+                  await clearPurchases();
+                  setCachedPurchases(null);
+                }}
+                className="rounded p-0.5 text-emerald-600 hover:bg-emerald-100 hover:text-red-600 dark:text-emerald-400 dark:hover:bg-emerald-900 dark:hover:text-red-400"
+                title="حذف الملف المحفوظ"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
+          )}
         </div>
         <div className="space-y-2 rounded-xl border border-border p-4">
           <label className="text-sm font-medium">

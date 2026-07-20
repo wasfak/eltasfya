@@ -59,6 +59,16 @@ const SETTLE_BUTTONS: { key: SettleCat; label: string }[] = [
   { key: "neg", label: "لم يصل" },
 ];
 
+/**
+ * "علامة" rows: the item name contains one of these exact markers and the
+ * settlement (التسوية) is ≥ 0. Such rows are highlighted purple and flagged.
+ */
+const ALAMA_MARKERS = ["#C.C#", "#B#", "#NA#"];
+
+function isAlama(name: string, tasfya: number): boolean {
+  return tasfya >= 0 && ALAMA_MARKERS.some((m) => name.includes(m));
+}
+
 function rowClass(tasfya: number) {
   if (tasfya < 0) return "bg-red-50/40 dark:bg-red-950/20";
   if (tasfya === 0) return "bg-emerald-50/40 dark:bg-emerald-950/20";
@@ -688,21 +698,32 @@ export default function TasfyaPage() {
                 </tr>
               </thead>
               <tbody>
-                {visibleRows.map((row) => (
+                {visibleRows.map((row) => {
+                  const alama = isAlama(row.name, row.tasfya);
+                  return (
                   <tr
                     key={`${row.code}-${row.isExtra ? "extra" : "report"}`}
                     className={cn(
                       "border-b border-border/50 transition-colors last:border-0 hover:bg-muted/40",
-                      rowClass(row.tasfya),
+                      alama
+                        ? "bg-purple-100 dark:bg-purple-950/40"
+                        : rowClass(row.tasfya),
                     )}
                   >
                     <td
                       className={cn(
                         "border-s-4 px-4 py-3 text-center align-middle font-medium tabular-nums",
-                        accentClass(row.tasfya),
+                        alama ? "border-s-purple-500" : accentClass(row.tasfya),
                       )}
                     >
-                      {row.code}
+                      <div className="flex items-center justify-center gap-1.5">
+                        <span>{row.code}</span>
+                        {alama && (
+                          <span className="inline-flex rounded-full bg-purple-600 px-2 py-0.5 text-xs font-semibold text-white dark:bg-purple-500">
+                            3alama
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-center align-middle">
                       {row.name}
@@ -821,7 +842,8 @@ export default function TasfyaPage() {
                       )}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
                 {visibleRows.length === 0 && (
                   <tr>
                     <td

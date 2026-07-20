@@ -52,7 +52,10 @@ function normalizeByDate(
 
   for (const line of purchases) {
     let date = line.date;
-    if (daysBetween(date, referenceDate) > DATE_NORMALIZATION_WINDOW_DAYS) {
+    // Lines older than referenceDate − 100 days are stamped at referenceDate so
+    // they still survive the `date >= referenceDate` cut below. daysBetween is
+    // (date − referenceDate) in days, so "100+ days before" is < −WINDOW.
+    if (daysBetween(date, referenceDate) < -DATE_NORMALIZATION_WINDOW_DAYS) {
       date = referenceDate;
     }
     if (date.getTime() < referenceDate.getTime()) continue;

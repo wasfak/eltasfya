@@ -15,8 +15,6 @@ function formatDate(d: Date): string {
   return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
 }
 
-const DATE_NORMALIZATION_WINDOW_DAYS = 100;
-
 /** A purchase line is a بونص (bonus / free goods) when أساسي = 100%. */
 function isBonus(line: PurchaseLine): boolean {
   return line.basicPct === 100;
@@ -33,37 +31,20 @@ export function bonusPercent(received: number, bonus: number): number {
   return Math.round((bonus / paid) * 10000) / 100;
 }
 
-function daysBetween(a: Date, b: Date): number {
-  return (a.getTime() - b.getTime()) / (1000 * 60 * 60 * 24);
-}
-
 /**
- * Applies the reference-date rule (ported from the original script): lines older
- * than `referenceDate - 100 days` are treated as having occurred on
- * `referenceDate`; every line (after that adjustment) must fall on or after
- * `referenceDate` to be counted. Purchases are matched to orders by item code
- * only — the distributor (`company`) is intentionally ignored.
+ * The settlement counts only purchases dated on or after the reference date
+ * (the PO's تاريخ), and each keeps its real date. Purchases before the
+ * reference date are excluded from the settlement (they still appear in the
+ * full Buy History). Purchases are matched to orders by item code only — the
+ * distributor (`company`) is intentionally ignored.
  */
 function normalizeByDate(
   purchases: PurchaseLine[],
   referenceDate: Date
 ): PurchaseLine[] {
-  const result: PurchaseLine[] = [];
-
-  for (const line of purchases) {
-    let date = line.date;
-    // Lines older than referenceDate − 100 days are stamped at referenceDate so
-    // they still survive the `date >= referenceDate` cut below. daysBetween is
-    // (date − referenceDate) in days, so "100+ days before" is < −WINDOW.
-    if (daysBetween(date, referenceDate) < -DATE_NORMALIZATION_WINDOW_DAYS) {
-      date = referenceDate;
-    }
-    if (date.getTime() < referenceDate.getTime()) continue;
-
-    result.push({ ...line, date });
-  }
-
-  return result;
+  return purchases.filter(
+    (line) => line.date.getTime() >= referenceDate.getTime()
+  );
 }
 
 interface Aggregate {
@@ -93,7 +74,10 @@ interface AggBuilder {
   wExtra: number;
   wSpecial: number;
   nonBonusQty: number;
-  lines: PurchaseDetail[];
+  // Purchase-line breakdown, keyed so lines from the same invoice that share
+  // the same supplier, date and discount rates (i.e. the same purchase split
+  // across batches/تشغيلات) are merged into one, summing their quantities.
+  lines: Map<string, PurchaseDetail>;
 }
 
 function aggregateByCode(lines: PurchaseLine[]): Map<string, Aggregate> {
@@ -112,21 +96,31 @@ function aggregateByCode(lines: PurchaseLine[]): Map<string, Aggregate> {
         wExtra: 0,
         wSpecial: 0,
         nonBonusQty: 0,
-        lines: [],
+        lines: new Map(),
       };
       builders.set(line.code, b);
     }
 
     if (line.company) b.suppliers.add(line.company);
-    b.lines.push({
-      supplier: line.company,
-      invoice: line.invoice,
-      date: formatDate(line.date),
-      received: line.kmya,
-      basicPct: round2(line.basicPct),
-      extraPct: round2(line.extraPct),
-      specialPct: round2(line.specialPct),
-    });
+    const basicPct = round2(line.basicPct);
+    const extraPct = round2(line.extraPct);
+    const specialPct = round2(line.specialPct);
+    const dateText = formatDate(line.date);
+    const key = `${line.company}||${line.invoice}||${dateText}||${basicPct}||${extraPct}||${specialPct}`;
+    const existing = b.lines.get(key);
+    if (existing) {
+      existing.received += line.kmya;
+    } else {
+      b.lines.set(key, {
+        supplier: line.company,
+        invoice: line.invoice,
+        date: dateText,
+        received: line.kmya,
+        basicPct,
+        extraPct,
+        specialPct,
+      });
+    }
     b.received += line.kmya;
     if (isBonus(line)) {
       b.bonus += line.kmya;
@@ -152,7 +146,7 @@ function aggregateByCode(lines: PurchaseLine[]): Map<string, Aggregate> {
       basicPct: b.nonBonusQty ? round2(b.wBasic / q) : 0,
       extraPct: b.nonBonusQty ? round2(b.wExtra / q) : 0,
       specialPct: b.nonBonusQty ? round2(b.wSpecial / q) : 0,
-      lines: b.lines,
+      lines: [...b.lines.values()],
     });
   }
   return byCode;

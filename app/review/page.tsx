@@ -5,10 +5,13 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  Download,
   FileSpreadsheet,
   Filter,
+  Gift,
   HardDrive,
   Loader2,
+  PackageX,
   Search,
   Trash2,
   TrendingUp,
@@ -19,7 +22,8 @@ import { cn } from "@/lib/utils";
 import { parseHtmlTable } from "@/lib/tasfya/parseTable";
 import { parsePurchases } from "@/lib/tasfya/purchases";
 import { parseStock } from "@/lib/tasfya/stock";
-import { computeReview } from "@/lib/tasfya/report";
+import { computeReview, bonusPercent } from "@/lib/tasfya/report";
+import { buildBonusGapWorkbook } from "@/lib/tasfya/exportExcel";
 import {
   savePurchases,
   loadPurchases,
@@ -46,6 +50,8 @@ interface DisplayRow {
   lines: PurchaseDetail[];
   /** بونص recomputed from the visible lines (lines where أساسي = 100%). */
   bonus: number;
+  /** Total received quantity across the visible lines (incl. bonus units). */
+  received: number;
 }
 
 function pct(value: number) {
@@ -90,6 +96,13 @@ const FILTER_BY_KEY = Object.fromEntries(
 /** A line's discount % compared to the previous invoice for the same item. */
 type Trend = "first" | "same" | "up" | "down" | "na";
 
+/**
+ * Discount rates within this many percentage points of each other are treated
+ * as unchanged — a jump like 29.99% → 30% is just rounding noise, not a real
+ * change in the deal, so it shouldn't be flagged.
+ */
+const DISCOUNT_EPSILON = 0.1;
+
 /** The three discount columns we watch for changes across invoices. */
 const DISCOUNT_GETTERS: ((l: PurchaseDetail) => number)[] = [
   (l) => l.basicPct,
@@ -119,7 +132,8 @@ function trendsFor(
     const v = get(l);
     const prev = prevBySupplier.get(key);
     if (prev === undefined) out.push("first");
-    else out.push(v > prev ? "up" : v < prev ? "down" : "same");
+    else if (Math.abs(v - prev) <= DISCOUNT_EPSILON) out.push("same");
+    else out.push(v > prev ? "up" : "down");
     prevBySupplier.set(key, v);
   }
   return out;
@@ -130,6 +144,36 @@ function hasDiscountChange(lines: PurchaseDetail[]): boolean {
   return DISCOUNT_GETTERS.some((g) =>
     trendsFor(lines, g).some((t) => t === "up" || t === "down"),
   );
+}
+
+/** Stable key identifying one invoice (per supplier + date) within an item. */
+function invoiceKey(l: PurchaseDetail): string {
+  return `${l.supplier}||${l.invoice}||${l.date}`;
+}
+
+/**
+ * For an item that receives a بونص on at least one invoice, returns the set of
+ * its invoices that brought a paid (non-bonus) line but NO بونص line — i.e. the
+ * purchases where the expected free goods are missing. Returns an empty set for
+ * items that never get a bonus at all, since there's no established deal to
+ * measure a "missing" bonus against.
+ */
+function missingBonusInvoices(lines: PurchaseDetail[]): Set<string> {
+  const byInvoice = new Map<string, { paid: boolean; bonus: boolean }>();
+  for (const l of lines) {
+    const key = invoiceKey(l);
+    const g = byInvoice.get(key) ?? { paid: false, bonus: false };
+    if (l.basicPct === 100) g.bonus = true;
+    else g.paid = true;
+    byInvoice.set(key, g);
+  }
+  const out = new Set<string>();
+  const anyBonus = [...byInvoice.values()].some((g) => g.bonus);
+  if (!anyBonus) return out;
+  for (const [key, g] of byInvoice) {
+    if (g.paid && !g.bonus) out.add(key);
+  }
+  return out;
 }
 
 /**
@@ -205,6 +249,10 @@ export default function ReviewPage() {
   const [search, setSearch] = useState("");
   // Show only items whose أساسي/إضافي/خاص discount changed across invoices.
   const [showChanged, setShowChanged] = useState(false);
+  // Show only items that received at least one بونص line in the current view.
+  const [showBonusOnly, setShowBonusOnly] = useState(false);
+  // Show only items that have an invoice missing its expected بونص.
+  const [showBonusGaps, setShowBonusGaps] = useState(false);
 
   // Cached purchases from IndexedDB.
   const [cachedPurchases, setCachedPurchases] = useState<{
@@ -284,7 +332,8 @@ export default function ReviewPage() {
         (sum, l) => sum + (l.basicPct === 100 ? l.received : 0),
         0,
       );
-      out.push({ code: r.code, name: r.name, lines, bonus });
+      const received = lines.reduce((sum, l) => sum + l.received, 0);
+      out.push({ code: r.code, name: r.name, lines, bonus, received });
     }
     return out;
   }, [result, search, filters]);
@@ -302,15 +351,37 @@ export default function ReviewPage() {
 
   const showChangedActive = showChanged && supplierFiltered;
 
+  // Items that received at least one بونص line among their visible lines.
+  const bonusCount = useMemo(
+    () => baseRows.reduce((n, r) => n + (r.bonus > 0 ? 1 : 0), 0),
+    [baseRows],
+  );
+
+  // Items with at least one invoice that's missing its expected بونص.
+  const bonusGapCount = useMemo(
+    () =>
+      baseRows.reduce(
+        (n, r) => n + (missingBonusInvoices(r.lines).size > 0 ? 1 : 0),
+        0,
+      ),
+    [baseRows],
+  );
+
   const visibleRows = useMemo<DisplayRow[]>(() => {
-    if (!showChangedActive) return baseRows;
-    return baseRows.filter((r) => changedCodes.has(r.code));
-  }, [baseRows, showChangedActive, changedCodes]);
+    let rows = baseRows;
+    if (showChangedActive) rows = rows.filter((r) => changedCodes.has(r.code));
+    if (showBonusOnly) rows = rows.filter((r) => r.bonus > 0);
+    if (showBonusGaps)
+      rows = rows.filter((r) => missingBonusInvoices(r.lines).size > 0);
+    return rows;
+  }, [baseRows, showChangedActive, changedCodes, showBonusOnly, showBonusGaps]);
 
   const activeFilterCount =
     Object.keys(filters).length +
     (search.trim() ? 1 : 0) +
-    (showChangedActive ? 1 : 0);
+    (showChangedActive ? 1 : 0) +
+    (showBonusOnly ? 1 : 0) +
+    (showBonusGaps ? 1 : 0);
 
   // ---- Filter helpers (Excel-style dropdown) ----
   const setColumnFilter = (
@@ -354,7 +425,40 @@ export default function ReviewPage() {
     setSearch("");
     setFilters({});
     setShowChanged(false);
+    setShowBonusOnly(false);
+    setShowBonusGaps(false);
   };
+
+  // Export every bonus-gap invoice among the currently visible rows: one row per
+  // invoice that brought a paid line but no بونص (item, supplier, invoice, date).
+  async function downloadBonusGaps() {
+    const rows = visibleRows.flatMap((r) => {
+      const gaps = missingBonusInvoices(r.lines);
+      if (gaps.size === 0) return [];
+      const seen = new Set<string>();
+      return r.lines
+        .filter((l) => gaps.has(invoiceKey(l)) && !seen.has(invoiceKey(l)) && seen.add(invoiceKey(l)))
+        .map((l) => ({
+          code: r.code,
+          name: r.name,
+          supplier: l.supplier,
+          invoice: l.invoice,
+          date: l.date,
+        }));
+    });
+    if (rows.length === 0) return;
+
+    const buffer = await buildBonusGapWorkbook(rows);
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "invoices_without_bonus.xlsx";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   // Close the dropdown on outside click / escape / scroll.
   useEffect(() => {
@@ -463,6 +567,8 @@ export default function ReviewPage() {
       setFilters({});
       setMenu(null);
       setShowChanged(false);
+      setShowBonusOnly(false);
+      setShowBonusGaps(false);
     } catch {
       setError(
         "حدث خطأ أثناء معالجة الملفات. تأكد من أنها ملفات SofTech صحيحة (HTML).",
@@ -639,6 +745,33 @@ export default function ReviewPage() {
               <TrendingUp />
               تغيّر الخصم ({changedCodes.size})
             </Button>
+            <Button
+              size="sm"
+              variant={showBonusOnly ? "default" : "outline"}
+              onClick={() => setShowBonusOnly((v) => !v)}
+              disabled={bonusCount === 0}
+            >
+              <Gift />
+              له بونص ({bonusCount})
+            </Button>
+            <Button
+              size="sm"
+              variant={showBonusGaps ? "default" : "outline"}
+              onClick={() => setShowBonusGaps((v) => !v)}
+              disabled={bonusGapCount === 0}
+            >
+              <PackageX />
+              فاتورة بدون بونص ({bonusGapCount})
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={downloadBonusGaps}
+              disabled={bonusGapCount === 0}
+            >
+              <Download />
+              تحميل بدون بونص
+            </Button>
             <span className="text-xs text-muted-foreground">
               {supplierFiltered
                 ? "Items where أساسي / إضافي / خاص % differs between that supplier's invoices."
@@ -674,12 +807,13 @@ export default function ReviewPage() {
                 <tr className="[&>th]:border-b [&>th]:border-border [&>th]:px-3 [&>th]:py-2.5 [&>th]:text-center [&>th]:text-xs [&>th]:font-semibold [&>th]:text-muted-foreground">
                   <th>كود الصنف</th>
                   <th>اسم الصنف</th>
+                  <th>بونص</th>
+                  <th>% بونص</th>
                   <th>{filterHeader("supplier", "اسم المورد")}</th>
                   <th>كمية الوارد</th>
                   <th>{filterHeader("basicPct", "أساسي %")}</th>
                   <th>إضافي %</th>
                   <th>خاص %</th>
-                  <th>بونص</th>
                 </tr>
               </thead>
               <tbody>
@@ -697,6 +831,9 @@ export default function ReviewPage() {
                     ? trendsFor(row.lines, (l) => l.specialPct)
                     : [];
                   const changed = changedCodes.has(row.code);
+                  // Invoices that brought a paid line but no بونص (only for
+                  // items that get a bonus elsewhere).
+                  const gaps = missingBonusInvoices(row.lines);
                   return (
                     <tr
                       key={row.code}
@@ -719,19 +856,50 @@ export default function ReviewPage() {
                           </span>
                         )}
                       </td>
+                      <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
+                        {row.bonus}
+                      </td>
+                      <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
+                        {pct(bonusPercent(row.received, row.bonus))}
+                      </td>
                       <td className="p-0 align-top text-center">
-                        {row.lines.map((l, i) => (
-                          <div key={i} className={ENTRY}>
-                            <span className="font-medium whitespace-nowrap">
-                              {l.supplier || "—"}
-                            </span>
-                            <span className="text-xs text-muted-foreground whitespace-nowrap">
-                              {[l.invoice && `Inv. ${l.invoice}`, l.date]
-                                .filter(Boolean)
-                                .join(" · ")}
-                            </span>
-                          </div>
-                        ))}
+                        {row.lines.map((l, i) => {
+                          const gap = gaps.has(invoiceKey(l));
+                          return (
+                            <div
+                              key={i}
+                              className={cn(
+                                ENTRY,
+                                gap && "bg-red-50 dark:bg-red-950/30",
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-1 font-medium whitespace-nowrap",
+                                  gap && "text-red-700 dark:text-red-300",
+                                )}
+                              >
+                                {gap && (
+                                  <PackageX className="size-3 shrink-0" />
+                                )}
+                                {l.supplier || "—"}
+                              </span>
+                              <span
+                                className={cn(
+                                  "text-xs whitespace-nowrap",
+                                  gap
+                                    ? "text-red-600/80 dark:text-red-400/80"
+                                    : "text-muted-foreground",
+                                )}
+                              >
+                                {[l.invoice && `Inv. ${l.invoice}`, l.date]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                                {gap && " · بدون بونص"}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </td>
                       <td className="p-0 align-top text-center tabular-nums">
                         {row.lines.map((l, i) => (
@@ -743,16 +911,13 @@ export default function ReviewPage() {
                       {discountColumn(row.lines, tBasic, (l) => l.basicPct)}
                       {discountColumn(row.lines, tExtra, (l) => l.extraPct)}
                       {discountColumn(row.lines, tSpecial, (l) => l.specialPct)}
-                      <td className="px-4 py-3 text-center align-middle font-medium tabular-nums">
-                        {row.bonus}
-                      </td>
                     </tr>
                   );
                 })}
                 {visibleRows.length === 0 && (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={9}
                       className="px-3 py-10 text-center text-muted-foreground"
                     >
                       No rows match the current search / filters.

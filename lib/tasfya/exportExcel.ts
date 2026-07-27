@@ -197,6 +197,67 @@ export async function buildWorkbook(
   return buffer as ArrayBuffer;
 }
 
+/** One invoice that brought a paid line but no بونص, for review. */
+export type BonusGapRow = {
+  code: string;
+  name: string;
+  supplier: string;
+  invoice: string;
+  date: string;
+};
+
+/**
+ * Bonus-gap export: one sheet listing every invoice that's missing its expected
+ * بونص — item code/name, اسم المورد, invoice number and date — so they can be
+ * reviewed. Columns auto-fit, header is frozen and bold.
+ */
+export async function buildBonusGapWorkbook(
+  rows: BonusGapRow[],
+): Promise<ArrayBuffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("بدون بونص", {
+    views: [{ rightToLeft: true, state: "frozen", ySplit: 1 }],
+  });
+
+  const cols: { header: string; value: (r: BonusGapRow) => string }[] = [
+    { header: "كود الصنف", value: (r) => r.code },
+    { header: "اسم الصنف", value: (r) => r.name },
+    { header: "اسم المورد", value: (r) => r.supplier || "—" },
+    { header: "رقم الفاتورة", value: (r) => r.invoice },
+    { header: "التاريخ", value: (r) => r.date },
+  ];
+
+  sheet.columns = cols.map((c) => ({ header: c.header }));
+  for (const r of rows) sheet.addRow(cols.map((c) => c.value(r)));
+
+  // Auto-fit each column to its widest cell, clamped.
+  cols.forEach((_, idx) => {
+    const column = sheet.getColumn(idx + 1);
+    let max = 0;
+    column.eachCell({ includeEmpty: true }, (cell) => {
+      const len = String(cell.value ?? "").length;
+      if (len > max) max = len;
+    });
+    column.width = Math.min(Math.max(max + 2, 10), 60);
+  });
+
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.alignment = { horizontal: "center", vertical: "middle" };
+
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber !== 1) {
+      row.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    }
+    for (let c = 1; c <= cols.length; c++) {
+      row.getCell(c).border = THIN_BORDER;
+    }
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return buffer as ArrayBuffer;
+}
+
 /** One item in the simplified order export. */
 export type SimpleRow = { code: string; name: string; tasfya: number };
 

@@ -23,13 +23,23 @@ import { parseHtmlTable } from "@/lib/tasfya/parseTable";
 import { parseOrder } from "@/lib/tasfya/order";
 import { parsePurchases } from "@/lib/tasfya/purchases";
 import { parseStock } from "@/lib/tasfya/stock";
-import { parseCosmoCsv, type CosmoData, type CosmoRow } from "@/lib/tasfya/cosmo";
+import {
+  parseCosmoCsv,
+  type CosmoData,
+  type CosmoRow,
+} from "@/lib/tasfya/cosmo";
 import { bonusPercent, computeReport } from "@/lib/tasfya/report";
 import { buildSimpleWorkbook } from "@/lib/tasfya/exportExcel";
+import {
+  parseOrderExcel,
+  readFileAsArrayBuffer,
+} from "@/lib/tasfya/orderExcel";
 import { ProjectBar } from "@/components/tasfya/project-bar";
 import type {
+  OrderData,
   PurchaseLine,
   ReportRow,
+  StockData,
   TasfyaResult,
 } from "@/lib/tasfya/types";
 
@@ -237,7 +247,8 @@ function csvNum(v: string | undefined): number {
  */
 function reorderQty(row: CombinedRow): number | null {
   if (!row.cosmo) return null;
-  const onHand = csvNum(row.cosmo[CSV_KEYS.branches]) + csvNum(row.cosmo[CSV_KEYS.main]);
+  const onHand =
+    csvNum(row.cosmo[CSV_KEYS.branches]) + csvNum(row.cosmo[CSV_KEYS.main]);
   const sales55 = csvNum(row.cosmo[CSV_KEYS.sales55]);
   // Round the gap to the nearest multiple of 5 (e.g. 448 → 450).
   return onHand < sales55 ? Math.round((sales55 - onHand) / 5) * 5 : null;
@@ -355,7 +366,11 @@ function readFileAsText(file: File): Promise<string> {
   });
 }
 
-type Mode = "medicine" | "cosmo";
+// "تصفية التصفية": a second settlement pass. The order comes from an Excel sheet
+// (code / item name / Order / company — the same file the settlement download
+// produces) instead of the order/stock HTML files, and there's no stock master,
+// so over-order (extra) items aren't detected. Everything else matches medicine.
+type Mode = "medicine" | "cosmo" | "tasfya2";
 
 export default function TasfyaPage() {
   // Which workflow the user picked on the landing screen. `null` = not chosen
@@ -372,6 +387,10 @@ export default function TasfyaPage() {
   // Cosmo mode: the extra AppSheet ViewData CSV, parsed.
   const [cosmoData, setCosmoData] = useState<CosmoData | null>(null);
   const [cosmoError, setCosmoError] = useState<string | null>(null);
+
+  // تصفية التصفية mode: the order Excel sheet. There's no reference date — all
+  // purchases in the invoices file are counted (no date cutoff).
+  const [orderExcelFile, setOrderExcelFile] = useState<File | null>(null);
   const [result, setResult] = useState<TasfyaResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -534,9 +553,7 @@ export default function TasfyaPage() {
     const lines = allPurchases.filter((l) => l.code === historyCode);
     const events = buildHistory(lines);
     const name =
-      allRows.find((r) => r.code === historyCode)?.name ??
-      lines[0]?.name ??
-      "";
+      allRows.find((r) => r.code === historyCode)?.name ?? lines[0]?.name ?? "";
     // Best deal = the invoice with the highest bonus %, and the trend from the
     // first bonus-bearing purchase to the last.
     const withBonus = events.filter((e) => e.bonusPct > 0);
@@ -655,6 +672,7 @@ export default function TasfyaPage() {
     setPurchasesFiles([]);
     setCosmoData(null);
     setCosmoError(null);
+    setOrderExcelFile(null);
     setAllPurchases([]);
     setHistoryCode(null);
     setUploadKey((k) => k + 1);
@@ -721,14 +739,32 @@ export default function TasfyaPage() {
     menu &&
     menuValues.every((v) => !filters[menu.col] || filters[menu.col].has(v));
 
+  // Can the Process button run? Medicine/Cosmo need order + stock + purchases
+  // HTML; تصفية التصفية needs the order Excel + purchases HTML.
+  const canProcess =
+    mode === "tasfya2"
+      ? !!orderExcelFile && purchasesFiles.length > 0
+      : !!orderFile && !!stockFile && purchasesFiles.length > 0;
+
+  // Shared bookkeeping after a report is computed from freshly uploaded files.
+  function afterProcess(nextResult: TasfyaResult, purchases: PurchaseLine[]) {
+    setResult(nextResult);
+    setAllPurchases(purchases); // keep raw lines for the buy-history panel
+    setEdits({});
+    setCurrentId(null); // a freshly processed report is a new, unsaved project
+    clearAll();
+    setSort(DEFAULT_SORT);
+  }
+
   async function handleProcess() {
-    if (!orderFile || !stockFile || purchasesFiles.length === 0) return;
+    if (loading || !canProcess) return;
+    if (mode === "tasfya2") return handleProcessTasfya2();
     setLoading(true);
     setError(null);
     try {
       const [orderHtml, stockHtml, purchasesHtmls] = await Promise.all([
-        readFileAsText(orderFile),
-        readFileAsText(stockFile),
+        readFileAsText(orderFile!),
+        readFileAsText(stockFile!),
         Promise.all(purchasesFiles.map(readFileAsText)),
       ]);
 
@@ -739,15 +775,60 @@ export default function TasfyaPage() {
       const purchases = purchasesHtmls.flatMap((html) =>
         parsePurchases(parseHtmlTable(html)),
       );
-      setResult(computeReport(order, purchases, stock));
-      setAllPurchases(purchases); // keep raw lines for the buy-history panel
-      setEdits({});
-      setCurrentId(null); // a freshly processed report is a new, unsaved project
-      clearAll();
-      setSort(DEFAULT_SORT);
+      afterProcess(computeReport(order, purchases, stock), purchases);
     } catch {
       setError(
         "حدث خطأ أثناء معالجة الملفات. تأكد من أنها ملفات SofTech صحيحة.",
+      );
+      setResult(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // تصفية التصفية: build the "order" from the uploaded Excel sheet (code / item
+  // name / Order / company) and run the same settlement against the purchases.
+  // There's no stock master, so an empty one is passed — this suppresses
+  // over-order (extra) items and takes the supplier from the sheet's company.
+  async function handleProcessTasfya2() {
+    if (!orderExcelFile || purchasesFiles.length === 0) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const [excelBuffer, purchasesHtmls] = await Promise.all([
+        readFileAsArrayBuffer(orderExcelFile),
+        Promise.all(purchasesFiles.map(readFileAsText)),
+      ]);
+
+      const { items, company } = await parseOrderExcel(excelBuffer);
+      if (items.length === 0) {
+        setError(
+          "لم يتم العثور على أصناف في ملف Excel. تأكد من وجود أعمدة code و item name و Order و company.",
+        );
+        setResult(null);
+        return;
+      }
+
+      const purchases = purchasesHtmls.flatMap((html) =>
+        parsePurchases(parseHtmlTable(html)),
+      );
+      const order: OrderData = {
+        items,
+        // No date cutoff: count every purchase line in the invoices file.
+        referenceDate: new Date(0),
+        orderNumber: "",
+      };
+      // Empty stock master: no codes ⇒ no extra items; supplier from the sheet.
+      const stock: StockData = {
+        items: [],
+        byCode: new Map(),
+        codes: new Set(),
+        supplier: company,
+      };
+      afterProcess(computeReport(order, purchases, stock), purchases);
+    } catch {
+      setError(
+        "حدث خطأ أثناء معالجة الملفات. تأكد من صحة ملف الفواتير (HTML) وملف Excel.",
       );
       setResult(null);
     } finally {
@@ -823,11 +904,9 @@ export default function TasfyaPage() {
       >
         <div className="text-center">
           <h1 className="text-3xl font-bold tracking-tight">Choose a mode</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Select the workflow you want to use.
-          </p>
+          <p className="mt-2 text-sm">Make your life easier!!..</p>
         </div>
-        <div className="grid w-full gap-4 sm:grid-cols-2">
+        <div className="grid w-full gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <button
             type="button"
             onClick={() => setMode("medicine")}
@@ -854,6 +933,22 @@ export default function TasfyaPage() {
               Same settlement report, plus the AppSheet inventory CSV.
             </span>
           </button>
+          <button
+            type="button"
+            onClick={() => setMode("tasfya2")}
+            className="group flex flex-col items-center gap-3 rounded-2xl border border-border bg-card p-8 text-center shadow-sm transition hover:border-primary hover:shadow-md"
+          >
+            <span className="grid size-14 place-items-center rounded-full bg-primary/10 text-primary transition group-hover:bg-primary group-hover:text-primary-foreground">
+              <FileSpreadsheet className="size-7" />
+            </span>
+            <span className="text-lg font-semibold" dir="rtl">
+              تصفية التصفية
+            </span>
+            <span className="text-sm text-muted-foreground">
+              A second settlement pass: the order comes from an Excel sheet
+              (code / item name / Order / company) plus the purchase invoices.
+            </span>
+          </button>
         </div>
       </div>
     );
@@ -864,25 +959,26 @@ export default function TasfyaPage() {
       <div className="flex flex-wrap items-end justify-between gap-3 border-b pb-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">
-            {mode === "cosmo" ? "Cosmo — " : ""}Purchase Order Settlement Report
+            {mode === "cosmo"
+              ? "Cosmo — "
+              : mode === "tasfya2"
+                ? "تصفية التصفية — "
+                : ""}
+            Purchase Order Settlement Report
           </h1>
           <p className="text-sm text-muted-foreground">
-            Upload the purchase order, supplier stock, and purchase invoices
-            files
-            {mode === "cosmo" ? ", plus the AppSheet CSV," : ""} to generate the
-            settlement report.
+            {mode === "tasfya2"
+              ? "Upload the order Excel sheet (code / item name / Order / company) and the purchase invoices file to generate the settlement report."
+              : mode === "cosmo"
+                ? "Upload the purchase order, supplier stock, and purchase invoices files, plus the AppSheet CSV, to generate the settlement report."
+                : "Upload the purchase order, supplier stock, and purchase invoices files to generate the settlement report."}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={() => setMode(null)}>
             <ArrowUpDown /> Change mode
           </Button>
-          <Button
-            onClick={handleProcess}
-            disabled={
-              !orderFile || !stockFile || purchasesFiles.length === 0 || loading
-            }
-          >
+          <Button onClick={handleProcess} disabled={!canProcess || loading}>
             {loading ? (
               <Loader2 className="animate-spin" />
             ) : (
@@ -916,26 +1012,32 @@ export default function TasfyaPage() {
           mode === "cosmo" ? "sm:grid-cols-2 lg:grid-cols-4" : "sm:grid-cols-3",
         )}
       >
-        <div className="space-y-2 rounded-xl border border-border p-4">
-          <label className="text-sm font-medium">ملف أمر التوريد (HTML)</label>
-          <input
-            type="file"
-            accept=".html,.htm"
-            onChange={(e) => setOrderFile(e.target.files?.[0] ?? null)}
-            className={fileInputClass}
-          />
-        </div>
-        <div className="space-y-2 rounded-xl border border-border p-4">
-          <label className="text-sm font-medium">
-            ملف رصيد المخزن للمورد (HTML)
-          </label>
-          <input
-            type="file"
-            accept=".html,.htm"
-            onChange={(e) => setStockFile(e.target.files?.[0] ?? null)}
-            className={fileInputClass}
-          />
-        </div>
+        {mode !== "tasfya2" && (
+          <div className="space-y-2 rounded-xl border border-border p-4">
+            <label className="text-sm font-medium">
+              ملف أمر التوريد (HTML)
+            </label>
+            <input
+              type="file"
+              accept=".html,.htm"
+              onChange={(e) => setOrderFile(e.target.files?.[0] ?? null)}
+              className={fileInputClass}
+            />
+          </div>
+        )}
+        {mode !== "tasfya2" && (
+          <div className="space-y-2 rounded-xl border border-border p-4">
+            <label className="text-sm font-medium">
+              ملف رصيد المخزن للمورد (HTML)
+            </label>
+            <input
+              type="file"
+              accept=".html,.htm"
+              onChange={(e) => setStockFile(e.target.files?.[0] ?? null)}
+              className={fileInputClass}
+            />
+          </div>
+        )}
         <div className="space-y-2 rounded-xl border border-border p-4">
           <label className="text-sm font-medium">
             ملف سجل فواتير شراء الأصناف (HTML)
@@ -951,13 +1053,34 @@ export default function TasfyaPage() {
           />
           {purchasesFiles.length > 0 && (
             <p className="text-xs text-muted-foreground">
-              {purchasesFiles.length} ملف: {purchasesFiles.map((f) => f.name).join("، ")}
+              {purchasesFiles.length} ملف:{" "}
+              {purchasesFiles.map((f) => f.name).join("، ")}
             </p>
           )}
         </div>
+        {mode === "tasfya2" && (
+          <div className="space-y-2 rounded-xl border border-border p-4">
+            <label className="text-sm font-medium">
+              ملف الطلب (Excel: code / item name / Order / company)
+            </label>
+            <input
+              type="file"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              onChange={(e) => setOrderExcelFile(e.target.files?.[0] ?? null)}
+              className={fileInputClass}
+            />
+            {orderExcelFile && (
+              <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                {orderExcelFile.name}
+              </p>
+            )}
+          </div>
+        )}
         {mode === "cosmo" && (
           <div className="space-y-2 rounded-xl border border-border p-4">
-            <label className="text-sm font-medium">ملف بيانات كوزمو (CSV)</label>
+            <label className="text-sm font-medium">
+              ملف بيانات كوزمو (CSV)
+            </label>
             <input
               type="file"
               accept=".csv,text/csv"
@@ -966,7 +1089,8 @@ export default function TasfyaPage() {
             />
             {cosmoData && (
               <p className="text-xs text-emerald-600 dark:text-emerald-400">
-                تم تحميل {cosmoData.rows.length.toLocaleString("en-US")} صف من CSV
+                تم تحميل {cosmoData.rows.length.toLocaleString("en-US")} صف من
+                CSV
               </p>
             )}
           </div>
@@ -1161,7 +1285,7 @@ export default function TasfyaPage() {
                     <tr
                       key={`${row.code}-${row.isExtra ? "extra" : "report"}`}
                       className={cn(
-                        "border-b border-border/50 transition-colors last:border-0 hover:bg-muted/40",
+                        "border-b-2 border-neutral-400 transition-colors last:border-0 hover:bg-muted/40 dark:border-neutral-600",
                         changeHit
                           ? "bg-teal-100 dark:bg-teal-950/40"
                           : alama

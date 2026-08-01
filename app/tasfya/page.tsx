@@ -284,6 +284,18 @@ function fmtDate(d: Date): string {
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /**
+ * Parses the "YYYY-MM-DD" date-input value into a local-midnight Date, matching
+ * how PO/purchase dates are built (new Date(y, m-1, d)). Returns null when the
+ * field is empty or malformed, so the file's own reference date is kept.
+ */
+function parseStartOverride(value: string): Date | null {
+  if (!value) return null;
+  const [y, m, d] = value.split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+
+/**
  * Builds an item's buy history from the raw purchase lines: every invoice
  * (company + invoice# + date) becomes one event, combining its paid line(s)
  * and any بونص (أساسي = 100%) free line into paid/free quantities, a bonus %
@@ -391,6 +403,12 @@ export default function TasfyaPage() {
   // تصفية التصفية mode: the order Excel sheet. There's no reference date — all
   // purchases in the invoices file are counted (no date cutoff).
   const [orderExcelFile, setOrderExcelFile] = useState<File | null>(null);
+
+  // Optional manual settlement start date ("YYYY-MM-DD" from the date input).
+  // When set, it overrides the PO's تاريخ as the cutoff — used when a PO was
+  // never made (or has the wrong date) so the user can still run the تصفية from
+  // a date they choose. Empty = keep the file's own reference date.
+  const [startDateOverride, setStartDateOverride] = useState("");
   const [result, setResult] = useState<TasfyaResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -673,6 +691,7 @@ export default function TasfyaPage() {
     setCosmoData(null);
     setCosmoError(null);
     setOrderExcelFile(null);
+    setStartDateOverride("");
     setAllPurchases([]);
     setHistoryCode(null);
     setUploadKey((k) => k + 1);
@@ -769,6 +788,9 @@ export default function TasfyaPage() {
       ]);
 
       const order = parseOrder(parseHtmlTable(orderHtml));
+      // A manually chosen start date overrides the PO's own تاريخ as the cutoff.
+      const override = parseStartOverride(startDateOverride);
+      if (override) order.referenceDate = override;
       const stock = parseStock(parseHtmlTable(stockHtml));
       // Merge every uploaded register (e.g. medicine store + cosmo store) into
       // one list of purchase lines before computing the report.
@@ -814,8 +836,9 @@ export default function TasfyaPage() {
       );
       const order: OrderData = {
         items,
-        // No date cutoff: count every purchase line in the invoices file.
-        referenceDate: new Date(0),
+        // No PO here, so default to no date cutoff (count every purchase line);
+        // a manually chosen start date, when given, becomes the cutoff instead.
+        referenceDate: parseStartOverride(startDateOverride) ?? new Date(0),
         orderNumber: "",
       };
       // Empty stock master: no codes ⇒ no extra items; supplier from the sheet.
@@ -1094,6 +1117,36 @@ export default function TasfyaPage() {
               </p>
             )}
           </div>
+        )}
+      </div>
+
+      {/* Optional manual start date: overrides the PO's date as the settlement
+          cutoff — for when no PO was made (or its date is wrong). */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border p-4">
+        <label htmlFor="start-date" className="text-sm font-medium">
+          تاريخ بداية التصفية (اختياري)
+        </label>
+        <input
+          id="start-date"
+          type="date"
+          value={startDateOverride}
+          onChange={(e) => setStartDateOverride(e.target.value)}
+          className="h-9 rounded-lg border border-border bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        />
+        {startDateOverride ? (
+          <button
+            type="button"
+            onClick={() => setStartDateOverride("")}
+            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+          >
+            مسح
+          </button>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            {mode === "tasfya2"
+              ? "اتركه فارغًا لحساب كل الفواتير بدون تاريخ بداية."
+              : "اتركه فارغًا لاستخدام تاريخ أمر التوريد."}
+          </span>
         )}
       </div>
 

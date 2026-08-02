@@ -97,6 +97,16 @@ function isAlama(name: string, tasfya: number): boolean {
   return tasfya >= 0 && ALAMA_MARKERS.some((m) => name.includes(m));
 }
 
+/**
+ * "ناقص" rows: the item name contains one of the markers (#C.C# / #B# / #NA#).
+ * These mark items we couldn't source the full needed quantity for — regardless
+ * of the settlement value, so unlike isAlama there's no tasfya condition. Such
+ * rows are painted red and can be hidden with the الناقص quick button.
+ */
+function isNaqis(name: string): boolean {
+  return ALAMA_MARKERS.some((m) => name.includes(m));
+}
+
 function rowClass(tasfya: number) {
   if (tasfya < 0) return "bg-red-50/40 dark:bg-red-950/20";
   if (tasfya === 0) return "bg-emerald-50/40 dark:bg-emerald-950/20";
@@ -447,6 +457,8 @@ export default function TasfyaPage() {
   const [settle, setSettle] = useState<Set<SettleCat>>(new Set());
   // Quick "ReOrder" filter: when on, show only rows needing a reorder.
   const [reorderOnly, setReorderOnly] = useState(false);
+  // Quick "الناقص" filter: when on, hide all ناقص rows (marker items) from view.
+  const [hideNaqis, setHideNaqis] = useState(false);
 
   // Per-item settlement overrides, keyed by code, kept as raw strings.
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -565,6 +577,11 @@ export default function TasfyaPage() {
     [filteredRows],
   );
 
+  const naqisCount = useMemo(
+    () => filteredRows.filter((r) => isNaqis(r.name)).length,
+    [filteredRows],
+  );
+
   // Buy history for the item whose panel is open (null = closed).
   const history = useMemo(() => {
     if (!historyCode) return null;
@@ -591,6 +608,7 @@ export default function TasfyaPage() {
         : filteredRows.filter((r) => settle.has(settleCat(r.tasfya)));
     if (reorderOnly && mode === "cosmo")
       out = out.filter((r) => reorderQty(r) !== null);
+    if (hideNaqis) out = out.filter((r) => !isNaqis(r.name));
 
     if (sort) {
       const col = colByKey[sort.col];
@@ -605,7 +623,7 @@ export default function TasfyaPage() {
       });
     }
     return out;
-  }, [filteredRows, settle, sort, colByKey, reorderOnly, mode]);
+  }, [filteredRows, settle, sort, colByKey, reorderOnly, mode, hideNaqis]);
 
   const roActive = reorderOnly && mode === "cosmo";
 
@@ -613,7 +631,8 @@ export default function TasfyaPage() {
     Object.keys(filters).length +
     (search.trim() ? 1 : 0) +
     settle.size +
-    (roActive ? 1 : 0);
+    (roActive ? 1 : 0) +
+    (hideNaqis ? 1 : 0);
 
   const toggleSettle = (key: SettleCat) =>
     setSettle((prev) => {
@@ -663,6 +682,7 @@ export default function TasfyaPage() {
     setFilters({});
     setSettle(new Set());
     setReorderOnly(false);
+    setHideNaqis(false);
   };
 
   // Load a saved project's data into the view.
@@ -1214,6 +1234,13 @@ export default function TasfyaPage() {
                 ReOrder ({reorderCount})
               </Button>
             )}
+            <Button
+              size="sm"
+              variant={hideNaqis ? "default" : "outline"}
+              onClick={() => setHideNaqis((v) => !v)}
+            >
+              {hideNaqis ? "Show Naqis" : "Hide Naqis"} {naqisCount}
+            </Button>
           </div>
 
           {/* Toolbar: global search + row count + clear all */}
@@ -1327,6 +1354,7 @@ export default function TasfyaPage() {
               <tbody>
                 {visibleRows.map((row) => {
                   const alama = isAlama(row.name, row.tasfya);
+                  const naqis = isNaqis(row.name);
                   // Cosmo: does this row's نسبة التغير meet the typed threshold?
                   const cp = changePct(row);
                   const changeHit =
@@ -1343,7 +1371,9 @@ export default function TasfyaPage() {
                           ? "bg-teal-100 dark:bg-teal-950/40"
                           : alama
                             ? "bg-purple-100 dark:bg-purple-950/40"
-                            : rowClass(row.tasfya),
+                            : naqis
+                              ? "bg-red-200 text-red-950 dark:bg-red-900/50 dark:text-red-50"
+                              : rowClass(row.tasfya),
                       )}
                     >
                       <td
@@ -1351,7 +1381,9 @@ export default function TasfyaPage() {
                           "border-s-4 px-4 py-3 text-center align-middle font-medium tabular-nums",
                           alama
                             ? "border-s-purple-500"
-                            : accentClass(row.tasfya),
+                            : naqis
+                              ? "border-s-red-600"
+                              : accentClass(row.tasfya),
                         )}
                       >
                         <div className="flex items-center justify-center gap-1.5">

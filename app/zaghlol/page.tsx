@@ -183,23 +183,33 @@ export default function ZaghlolPage() {
 
   async function handleDownload() {
     if (!rows) return;
-    // Three columns only: code, item name, Order (capital O).
+    // Export every column shown in the table: code, item name, then each CSV
+    // column. Numeric-looking cells are written as numbers so Excel can sum/sort.
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Order", {
+    const sheet = workbook.addWorksheet("Zaghloul", {
       views: [{ state: "frozen", ySplit: 1 }],
     });
-    sheet.columns = [
-      { header: "code", key: "code", width: 14 },
-      { header: "item name", key: "name", width: 48 },
-      { header: "Order", key: "order", width: 12 },
-    ];
+    sheet.columns = columns.map((c) => ({
+      header: c.key === CODE_KEY ? "code" : c.key === NAME_KEY ? "item name" : c.key,
+      key: c.key,
+      width: c.key === NAME_KEY ? 48 : 14,
+    }));
     sheet.getRow(1).font = { bold: true };
     for (const r of filteredRows) {
-      sheet.addRow({
-        code: r.code,
-        name: r.name,
-        order: asNumber(r.csv?.["Order"] ?? "0") || 0,
-      });
+      const record: Record<string, string | number> = {};
+      for (const c of columns) {
+        const raw = cellValue(r, c.key);
+        const n = asNumber(raw);
+        // Keep code/name as text; write other cells as numbers when they parse.
+        record[c.key] =
+          c.key !== CODE_KEY &&
+          c.key !== NAME_KEY &&
+          raw !== "" &&
+          Number.isFinite(n)
+            ? n
+            : raw;
+      }
+      sheet.addRow(record);
     }
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], {

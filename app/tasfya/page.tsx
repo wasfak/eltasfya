@@ -490,9 +490,13 @@ export default function TasfyaPage() {
       })),
     ].map((r) => {
       const cosmo = cosmoByCode.get(r.code);
-      // In Cosmo mode, fold the ReOrder gap into the settlement number.
+      // In Cosmo mode, fold the ReOrder gap into the settlement number,
+      // adding any main-order shortfall (لم يصل, tasfya < 0) on top of the
+      // equation gap. An arrived/over-received order (وصل / زياده) contributes
+      // nothing — only what "didn't come" is added.
       const ro = reorderQty({ ...r, isExtra: false, cosmo });
-      const base = ro !== null ? r.tasfya + ro : r.tasfya;
+      const shortfall = r.tasfya < 0 ? -r.tasfya : 0;
+      const base = ro !== null ? shortfall + ro : r.tasfya;
       return { ...r, tasfya: effectiveTasfya(r.code, base), cosmo };
     });
     // effectiveTasfya reads `edits`, the real dependency.

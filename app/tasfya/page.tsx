@@ -253,10 +253,14 @@ function csvNum(v: string | undefined): number {
  * Cosmo "ReOrder" quantity: when the item's on-hand stock (الفروع branches +
  * الرئيسي main) is below its 55-day sales (بيع 55يوم), returns the gap between
  * them — i.e. how many need reordering. Otherwise returns null. Only rows with
- * a matched CSV row (Cosmo mode) can qualify.
+ * a matched CSV row (Cosmo mode) can qualify. Items with no paid arrival from
+ * the supplier (كمية الوارد − بونص ≤ 0, i.e. nothing came or only بونص did) are
+ * excluded: with no purchase to settle the reorder against, the equation isn't
+ * added.
  */
 function reorderQty(row: CombinedRow): number | null {
   if (!row.cosmo) return null;
+  if (row.received - row.bonus <= 0) return null;
   const onHand =
     csvNum(row.cosmo[CSV_KEYS.branches]) + csvNum(row.cosmo[CSV_KEYS.main]);
   const sales55 = csvNum(row.cosmo[CSV_KEYS.sales55]);
@@ -606,12 +610,18 @@ export default function TasfyaPage() {
   }, [historyCode, allPurchases, allRows]);
 
   const visibleRows = useMemo(() => {
+    // The quick buttons (settlement categories + ReOrder) combine with OR: a row
+    // shows if it matches any active button. With none active, all rows pass.
+    const settleActive = settle.size > 0;
+    const roOn = reorderOnly && mode === "cosmo";
     let out =
-      settle.size === 0
+      !settleActive && !roOn
         ? filteredRows
-        : filteredRows.filter((r) => settle.has(settleCat(r.tasfya)));
-    if (reorderOnly && mode === "cosmo")
-      out = out.filter((r) => reorderQty(r) !== null);
+        : filteredRows.filter(
+            (r) =>
+              (settleActive && settle.has(settleCat(r.tasfya))) ||
+              (roOn && reorderQty(r) !== null),
+          );
     if (hideNaqis) out = out.filter((r) => !isNaqis(r.name));
 
     if (sort) {
@@ -908,16 +918,17 @@ export default function TasfyaPage() {
 
   async function handleDownload() {
     if (!result) return;
-    // Which items to export: only those matching the active quick buttons
-    // (settlement categories and/or ReOrder); if no button is active, all rows.
-    const noButtons = settle.size === 0 && !roActive;
+    // Which items to export: those matching any active quick button (settlement
+    // categories OR ReOrder); if no button is active, all rows.
+    const settleActive = settle.size > 0;
+    const noButtons = !settleActive && !roActive;
     const rows = noButtons
       ? allRows
-      : allRows.filter((r) => {
-          if (roActive && reorderQty(r) === null) return false;
-          if (settle.size > 0 && !settle.has(settleCat(r.tasfya))) return false;
-          return true;
-        });
+      : allRows.filter(
+          (r) =>
+            (settleActive && settle.has(settleCat(r.tasfya))) ||
+            (roActive && reorderQty(r) !== null),
+        );
 
     // Simplified sheet: code, item name, Order (= |التسوية|), company (supplier).
     const buffer = await buildSimpleWorkbook(

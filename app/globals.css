@@ -128,3 +128,25 @@
     @apply font-sans;
   }
 }
+/* Moving gradient for the BrandLogo wordmark (cyan → purple → emerald). */
+@keyframes brand-gradient-move {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes brand-glow-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    background-position: 0% 50%;
+  }
+  50% {
+    opacity: 0.6;
+    background-position: 100% 50%;
+  }
+}

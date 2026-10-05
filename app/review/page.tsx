@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Check,
@@ -23,7 +24,11 @@ import { parseHtmlTable } from "@/lib/tasfya/parseTable";
 import { parsePurchases } from "@/lib/tasfya/purchases";
 import { parseStock } from "@/lib/tasfya/stock";
 import { computeReview, bonusPercent } from "@/lib/tasfya/report";
-import { buildBonusGapWorkbook } from "@/lib/tasfya/exportExcel";
+import {
+  buildBonusGapWorkbook,
+  buildExtraRuleWorkbook,
+  buildReviewWorkbook,
+} from "@/lib/tasfya/exportExcel";
 import {
   savePurchases,
   loadPurchases,
@@ -41,6 +46,20 @@ interface ReviewResult {
   /** Requested codes that had no purchase activity in the period. */
   missing: string[];
   referenceDate: Date;
+  /**
+   * Invoices (keyed `${company}||${invoice}`) that carry a بونص line for ANY
+   * item — بونص is an invoice-level term at these suppliers, so a paid line's
+   * expected إضافي depends on whether its whole invoice got a بونص, not just its
+   * own item. Computed from the full purchase file, across every code.
+   */
+  bonusInvoices: Set<string>;
+}
+
+const EMPTY_INVOICE_SET: Set<string> = new Set();
+
+/** Invoice-level بونص key for a rendered purchase line. */
+function bonusInvoiceKey(l: PurchaseDetail): string {
+  return `${l.supplier}||${l.invoice}`;
 }
 
 /** A row as rendered: an item with only its filter-matching lines kept. */
@@ -177,24 +196,118 @@ function missingBonusInvoices(lines: PurchaseDetail[]): Set<string> {
 }
 
 /**
+ * This rule applies only to purchases from رامكو فارم ادويه. Matched on
+ * "رامكو فارم" so it excludes the unrelated رامكو للاستيراد والتصدير (and the
+ * bare "رامكو"), which follow different deals.
+ */
+const RAMCO = "رامكو فارم";
+function isRamco(supplier: string): boolean {
+  return supplier.includes(RAMCO);
+}
+
+const near = (a: number, b: number) => Math.abs(a - b) <= DISCOUNT_EPSILON;
+
+/**
+ * The إضافي rule (رامكو only). Every paid line from رامكو must be exactly one of:
+ *   • إضافي = the standalone rate (5%) — allowed on its own, بونص or not; or
+ *   • إضافي = the with-بونص rate (2.5%) AND its invoice carries a بونص — the
+ *     reduced rate is only granted alongside the free goods that justify it.
+ * ANYTHING else is a violation: the reduced rate with no بونص, or any other
+ * إضافي entirely (3%, 1%, 0%, …). `bonusInvoices` holds the invoices (keyed
+ * `${company}||${invoice}`) that carry a بونص anywhere.
+ */
+function isExtraRuleViolation(
+  l: PurchaseDetail,
+  bonusInvoices: Set<string>,
+  standaloneRate: number,
+  withBonusRate: number,
+): boolean {
+  // The standard rate is always fine.
+  if (near(l.extraPct, standaloneRate)) return false;
+  // The reduced rate is fine only when the invoice actually got a بونص.
+  if (near(l.extraPct, withBonusRate) && bonusInvoices.has(bonusInvoiceKey(l)))
+    return false;
+  // Any other rate — or the reduced rate without a بونص — breaks the rule.
+  return true;
+}
+
+/** Plain-Arabic reason a رامكو paid line breaks the إضافي rule. */
+function extraRuleReason(
+  l: PurchaseDetail,
+  bonusInvoices: Set<string>,
+  standaloneRate: number,
+  withBonusRate: number,
+): string {
+  if (near(l.extraPct, withBonusRate) && !bonusInvoices.has(bonusInvoiceKey(l)))
+    return `إضافي ${pct(l.extraPct)} (مخفّض) بدون بونص في الفاتورة`;
+  return `إضافي ${pct(l.extraPct)} — المسموح ${pct(standaloneRate)} أو ${pct(
+    withBonusRate,
+  )} مع بونص`;
+}
+
+/** Invoice keys of رامكو paid lines that break the إضافي rule. */
+function extraRuleViolations(
+  lines: PurchaseDetail[],
+  bonusInvoices: Set<string>,
+  standaloneRate: number,
+  withBonusRate: number,
+): Set<string> {
+  const out = new Set<string>();
+  for (const l of lines) {
+    if (l.basicPct === 100) continue; // the بونص line itself, not a paid line
+    if (!isRamco(l.supplier)) continue; // rule is رامكو-only
+    if (isExtraRuleViolation(l, bonusInvoices, standaloneRate, withBonusRate))
+      out.add(invoiceKey(l));
+  }
+  return out;
+}
+
+/** One offending paid line. */
+interface ExtraViolationLine {
+  line: PurchaseDetail;
+}
+
+/** Like {@link extraRuleViolations} but returns the offending paid lines. */
+function extraRuleViolationLines(
+  lines: PurchaseDetail[],
+  bonusInvoices: Set<string>,
+  standaloneRate: number,
+  withBonusRate: number,
+): ExtraViolationLine[] {
+  const out: ExtraViolationLine[] = [];
+  for (const l of lines) {
+    if (l.basicPct === 100) continue;
+    if (!isRamco(l.supplier)) continue;
+    if (isExtraRuleViolation(l, bonusInvoices, standaloneRate, withBonusRate))
+      out.push({ line: l });
+  }
+  return out;
+}
+
+/**
  * Renders one discount column's per-line cells, marking a line that differs
  * from the previous invoice with a ▲ (higher discount) or ▼ (lower discount).
+ * A line flagged in `violations` (by index) is tinted red with a ⚠ instead — it
+ * breaks the بونص → إضافي rule.
  */
 function discountColumn(
   lines: PurchaseDetail[],
   trends: Trend[],
   get: (l: PurchaseDetail) => number,
+  violations?: boolean[],
 ) {
   return (
     <td className="p-0 align-top text-center tabular-nums">
       {lines.map((l, i) => {
-        const up = trends[i] === "up";
-        const down = trends[i] === "down";
+        const bad = violations?.[i];
+        const up = !bad && trends[i] === "up";
+        const down = !bad && trends[i] === "down";
         return (
           <div
             key={i}
             className={cn(
               ENTRY,
+              bad && "bg-red-100 dark:bg-red-950/50",
               up && "bg-emerald-50 dark:bg-emerald-950/30",
               down && "bg-red-50 dark:bg-red-950/30",
             )}
@@ -202,11 +315,13 @@ function discountColumn(
             <span
               className={cn(
                 "inline-flex items-center gap-1",
-                (up || down) && "font-bold",
+                (up || down || bad) && "font-bold",
                 up && "text-emerald-700 dark:text-emerald-300",
                 down && "text-red-700 dark:text-red-300",
+                bad && "text-red-700 dark:text-red-300",
               )}
             >
+              {bad && <AlertTriangle className="size-3" />}
               {up && <ArrowUp className="size-3" />}
               {down && <ArrowDown className="size-3" />}
               {pct(get(l))}
@@ -253,6 +368,13 @@ export default function ReviewPage() {
   const [showBonusOnly, setShowBonusOnly] = useState(false);
   // Show only items that have an invoice missing its expected بونص.
   const [showBonusGaps, setShowBonusGaps] = useState(false);
+  // Show only رامكو paid lines that break the إضافي rule (see
+  // isExtraRuleViolation). Two configurable rates: the standalone rate that's
+  // allowed on its own (5%) and the reduced rate that's only allowed with a
+  // بونص (2.5%).
+  const [showExtraRule, setShowExtraRule] = useState(false);
+  const [extraStandalone, setExtraStandalone] = useState("5");
+  const [extraWithBonus, setExtraWithBonus] = useState("2.5");
 
   // Cached purchases from IndexedDB.
   const [cachedPurchases, setCachedPurchases] = useState<{
@@ -367,21 +489,66 @@ export default function ReviewPage() {
     [baseRows],
   );
 
+  // The two إضافي rates. A blank/invalid input disables the rule (Number("") is
+  // 0, so guard the empty string).
+  const standaloneRate =
+    extraStandalone.trim() === "" ? NaN : Number(extraStandalone);
+  const withBonusRate =
+    extraWithBonus.trim() === "" ? NaN : Number(extraWithBonus);
+  const extraRuleReady =
+    Number.isFinite(standaloneRate) && Number.isFinite(withBonusRate);
+
+  // Invoices that carry a بونص for any item (invoice-level term).
+  const bonusInvoices = result?.bonusInvoices ?? EMPTY_INVOICE_SET;
+
+  // Items with at least one رامكو line that breaks the إضافي rule.
+  const extraRuleCount = useMemo(() => {
+    if (!extraRuleReady) return 0;
+    return baseRows.reduce(
+      (n, r) =>
+        n +
+        (extraRuleViolations(r.lines, bonusInvoices, standaloneRate, withBonusRate)
+          .size > 0
+          ? 1
+          : 0),
+      0,
+    );
+  }, [baseRows, extraRuleReady, bonusInvoices, standaloneRate, withBonusRate]);
+
+  const showExtraRuleActive = showExtraRule && extraRuleReady;
+
   const visibleRows = useMemo<DisplayRow[]>(() => {
     let rows = baseRows;
     if (showChangedActive) rows = rows.filter((r) => changedCodes.has(r.code));
     if (showBonusOnly) rows = rows.filter((r) => r.bonus > 0);
     if (showBonusGaps)
       rows = rows.filter((r) => missingBonusInvoices(r.lines).size > 0);
+    if (showExtraRuleActive)
+      rows = rows.filter(
+        (r) =>
+          extraRuleViolations(r.lines, bonusInvoices, standaloneRate, withBonusRate)
+            .size > 0,
+      );
     return rows;
-  }, [baseRows, showChangedActive, changedCodes, showBonusOnly, showBonusGaps]);
+  }, [
+    baseRows,
+    showChangedActive,
+    changedCodes,
+    showBonusOnly,
+    showBonusGaps,
+    showExtraRuleActive,
+    bonusInvoices,
+    standaloneRate,
+    withBonusRate,
+  ]);
 
   const activeFilterCount =
     Object.keys(filters).length +
     (search.trim() ? 1 : 0) +
     (showChangedActive ? 1 : 0) +
     (showBonusOnly ? 1 : 0) +
-    (showBonusGaps ? 1 : 0);
+    (showBonusGaps ? 1 : 0) +
+    (showExtraRuleActive ? 1 : 0);
 
   // ---- Filter helpers (Excel-style dropdown) ----
   const setColumnFilter = (
@@ -427,6 +594,7 @@ export default function ReviewPage() {
     setShowChanged(false);
     setShowBonusOnly(false);
     setShowBonusGaps(false);
+    setShowExtraRule(false);
   };
 
   // Export every bonus-gap invoice among the currently visible rows: one row per
@@ -449,13 +617,65 @@ export default function ReviewPage() {
     if (rows.length === 0) return;
 
     const buffer = await buildBonusGapWorkbook(rows);
+    downloadXlsx(buffer, "invoices_without_bonus.xlsx");
+  }
+
+  // Export exactly what's on screen (search + column filters + toggles applied):
+  // one row per visible item, mirroring the table columns and their per-line
+  // breakdown, with missing-بونص rows tinted red.
+  async function downloadResults() {
+    if (visibleRows.length === 0) return;
+    const rows = visibleRows.map((r) => ({
+      code: r.code,
+      name: r.name,
+      bonus: r.bonus,
+      received: r.received,
+      lines: r.lines,
+      gaps: missingBonusInvoices(r.lines),
+    }));
+    const buffer = await buildReviewWorkbook(rows);
+    downloadXlsx(buffer, "review.xlsx");
+  }
+
+  // Export every إضافي-rule violation among the visible rows: one row per
+  // offending invoice line with code, name, invoice number, supplier, date,
+  // whether the invoice had a بونص, the actual إضافي, and a plain reason.
+  async function downloadExtraViolations() {
+    if (!extraRuleReady) return;
+    const rows = visibleRows.flatMap((r) =>
+      extraRuleViolationLines(
+        r.lines,
+        bonusInvoices,
+        standaloneRate,
+        withBonusRate,
+      ).map((v) => ({
+        code: r.code,
+        name: r.name,
+        supplier: v.line.supplier,
+        invoice: v.line.invoice,
+        date: v.line.date,
+        actualExtra: v.line.extraPct,
+        reason: extraRuleReason(
+          v.line,
+          bonusInvoices,
+          standaloneRate,
+          withBonusRate,
+        ),
+      })),
+    );
+    if (rows.length === 0) return;
+    const buffer = await buildExtraRuleWorkbook(rows);
+    downloadXlsx(buffer, "extra_rule_violations.xlsx");
+  }
+
+  function downloadXlsx(buffer: ArrayBuffer, fileName: string) {
     const blob = new Blob([buffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "invoices_without_bonus.xlsx";
+    a.download = fileName;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -557,11 +777,24 @@ export default function ReviewPage() {
       const found = new Set(rows.map((r) => r.code));
       const missing = codes.filter((c) => !found.has(c));
 
+      // بونص is an invoice-level term: collect every invoice (across ALL items,
+      // not just the requested codes) that carries a بونص line in the period, so
+      // the إضافي rule can tell whether a paid line's whole invoice got a بونص.
+      const bonusInvoices = new Set<string>();
+      for (const l of purchases) {
+        if (
+          l.basicPct === 100 &&
+          l.date.getTime() >= referenceDate.getTime()
+        )
+          bonusInvoices.add(`${l.company}||${l.invoice}`);
+      }
+
       setResult({
         rows,
         requested: codes.length,
         missing,
         referenceDate,
+        bonusInvoices,
       });
       setSearch("");
       setFilters({});
@@ -569,6 +802,7 @@ export default function ReviewPage() {
       setShowChanged(false);
       setShowBonusOnly(false);
       setShowBonusGaps(false);
+      setShowExtraRule(false);
     } catch {
       setError(
         "حدث خطأ أثناء معالجة الملفات. تأكد من أنها ملفات SofTech صحيحة (HTML).",
@@ -763,6 +997,46 @@ export default function ReviewPage() {
               <PackageX />
               فاتورة بدون بونص ({bonusGapCount})
             </Button>
+            <div className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1">
+              <Button
+                size="sm"
+                variant={showExtraRuleActive ? "default" : "outline"}
+                onClick={() => setShowExtraRule((v) => !v)}
+                disabled={!extraRuleReady || extraRuleCount === 0}
+              >
+                <AlertTriangle />
+                مخالفة إضافي (رامكو) ({extraRuleCount})
+              </Button>
+              <span className="text-xs text-muted-foreground">رامكو · إضافي</span>
+              <input
+                type="number"
+                step="0.5"
+                value={extraStandalone}
+                onChange={(e) => setExtraStandalone(e.target.value)}
+                className="h-8 w-14 rounded-md border border-border bg-background px-1.5 text-center text-sm tabular-nums outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
+                title="نسبة إضافي المسموحة بمفردها (بدون بونص)"
+              />
+              <span className="text-xs text-muted-foreground">% أو</span>
+              <input
+                type="number"
+                step="0.5"
+                value={extraWithBonus}
+                onChange={(e) => setExtraWithBonus(e.target.value)}
+                className="h-8 w-14 rounded-md border border-border bg-background px-1.5 text-center text-sm tabular-nums outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
+                title="نسبة إضافي المخفّضة التي يجب أن يصاحبها بونص (رامكو)"
+              />
+              <span className="text-xs text-muted-foreground">% + بونص</span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={downloadExtraViolations}
+                disabled={!extraRuleReady || extraRuleCount === 0}
+                title="تحميل تفاصيل المخالفات (كود، اسم، رقم فاتورة، السبب)"
+              >
+                <Download />
+                تحميل المخالفات
+              </Button>
+            </div>
             <Button
               size="sm"
               variant="outline"
@@ -771,6 +1045,15 @@ export default function ReviewPage() {
             >
               <Download />
               تحميل بدون بونص
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={downloadResults}
+              disabled={visibleRows.length === 0}
+            >
+              <FileSpreadsheet />
+              تحميل النتائج ({visibleRows.length})
             </Button>
             <span className="text-xs text-muted-foreground">
               {supplierFiltered
@@ -834,6 +1117,18 @@ export default function ReviewPage() {
                   // Invoices that brought a paid line but no بونص (only for
                   // items that get a bonus elsewhere).
                   const gaps = missingBonusInvoices(row.lines);
+                  // Per-line flags for lines breaking the بونص → إضافي rule.
+                  const extraViol = extraRuleReady
+                    ? extraRuleViolations(
+                        row.lines,
+                        bonusInvoices,
+                        standaloneRate,
+                        withBonusRate,
+                      )
+                    : new Set<string>();
+                  const extraFlags = row.lines.map(
+                    (l) => l.basicPct !== 100 && extraViol.has(invoiceKey(l)),
+                  );
                   return (
                     <tr
                       key={row.code}
@@ -909,7 +1204,12 @@ export default function ReviewPage() {
                         ))}
                       </td>
                       {discountColumn(row.lines, tBasic, (l) => l.basicPct)}
-                      {discountColumn(row.lines, tExtra, (l) => l.extraPct)}
+                      {discountColumn(
+                        row.lines,
+                        tExtra,
+                        (l) => l.extraPct,
+                        extraFlags,
+                      )}
                       {discountColumn(row.lines, tSpecial, (l) => l.specialPct)}
                     </tr>
                   );

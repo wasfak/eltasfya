@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import * as React from "react";
-import { Home, FileSpreadsheet, ListChecks, Boxes } from "lucide-react";
+import { Home, FileSpreadsheet, ListChecks, Boxes, Landmark } from "lucide-react";
 
 import type { LucideIcon } from "lucide-react";
+import { BrandLogo } from "@/components/ui/brand-logo";
 
-type IconName = "home" | "tasfya" | "review" | "zaghloul";
+type IconName = "home" | "tasfya" | "review" | "zaghloul" | "hayaa";
 
 type Item = {
   value: string;
@@ -69,6 +70,7 @@ export function NotchNav({
     tasfya: FileSpreadsheet,
     review: ListChecks,
     zaghloul: Boxes,
+    hayaa: Landmark,
   };
 
   const updateNotch = React.useCallback(() => {
@@ -124,10 +126,15 @@ export function NotchNav({
   }, []);
 
   return (
-    <header className="relative flex w-full items-center justify-center p-4 h-16">
+    <header className="relative flex w-full items-center gap-4 p-4 h-16">
+      <Link href="/" className="shrink-0" aria-label="Home">
+        <BrandLogo />
+      </Link>
       <nav
         aria-label={ariaLabel}
-        className={["w-fit", className].filter(Boolean).join(" ")}
+        className={["flex min-w-0 flex-1 justify-center", className]
+          .filter(Boolean)
+          .join(" ")}
       >
         <div
           ref={containerRef}

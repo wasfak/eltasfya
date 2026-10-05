@@ -258,6 +258,193 @@ export async function buildBonusGapWorkbook(
   return buffer as ArrayBuffer;
 }
 
+/** One item (with its visible purchase lines) in the review-table export. */
+export type ReviewExportRow = {
+  code: string;
+  name: string;
+  bonus: number;
+  received: number;
+  lines: {
+    supplier: string;
+    invoice: string;
+    date: string;
+    received: number;
+    basicPct: number;
+    extraPct: number;
+    specialPct: number;
+  }[];
+  /** Invoice keys (supplier||invoice||date) that are missing their بونص. */
+  gaps?: Set<string>;
+};
+
+/** Stable per-invoice key, matching the review page's invoiceKey. */
+function reviewInvoiceKey(l: ReviewExportRow["lines"][number]): string {
+  return `${l.supplier}||${l.invoice}||${l.date}`;
+}
+
+/**
+ * Review-table export: mirrors exactly what's on screen in the Review page,
+ * honoring the currently-applied search / column filters / toggles — one item
+ * per row, with اسم المورد and the discount columns broken down one text line
+ * per visible purchase line (same as the UI). Rows whose invoice is missing its
+ * بونص are tinted red, matching the on-screen highlighting.
+ */
+export async function buildReviewWorkbook(
+  rows: ReviewExportRow[],
+): Promise<ArrayBuffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Review", {
+    views: [{ rightToLeft: true, state: "frozen", ySplit: 1 }],
+  });
+
+  const line = (
+    r: ReviewExportRow,
+    f: (l: ReviewExportRow["lines"][number]) => string | number,
+  ): string | number =>
+    r.lines.length === 1 ? f(r.lines[0]) : r.lines.map(f).join("\n");
+
+  const supplierLine = (l: ReviewExportRow["lines"][number]): string => {
+    const meta = [l.invoice && `Inv. ${l.invoice}`, l.date]
+      .filter(Boolean)
+      .join(" · ");
+    return [l.supplier || "—", meta].filter(Boolean).join(" — ");
+  };
+
+  const cols: {
+    header: string;
+    width: number;
+    value: (r: ReviewExportRow) => string | number;
+  }[] = [
+    { header: "كود الصنف", width: 16, value: (r) => r.code },
+    { header: "اسم الصنف", width: 50, value: (r) => r.name },
+    { header: "بونص", width: 10, value: (r) => r.bonus },
+    {
+      header: "% بونص",
+      width: 10,
+      value: (r) => pctText(bonusPercent(r.received, r.bonus)),
+    },
+    { header: "اسم المورد", width: 40, value: (r) => line(r, supplierLine) },
+    {
+      header: "كمية الوارد",
+      width: 14,
+      value: (r) => line(r, (l) => l.received),
+    },
+    {
+      header: "أساسي %",
+      width: 12,
+      value: (r) => line(r, (l) => pctText(l.basicPct)),
+    },
+    {
+      header: "إضافي %",
+      width: 12,
+      value: (r) => line(r, (l) => pctText(l.extraPct)),
+    },
+    {
+      header: "خاص %",
+      width: 12,
+      value: (r) => line(r, (l) => pctText(l.specialPct)),
+    },
+  ];
+
+  sheet.columns = cols.map((c) => ({ header: c.header, width: c.width }));
+  for (const r of rows) sheet.addRow(cols.map((c) => c.value(r)));
+
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.alignment = { horizontal: "center", vertical: "middle" };
+
+  const gapFill: ExcelJS.Fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFFFC7CE" }, // red, matching a missing-bonus row
+  };
+
+  rows.forEach((src, i) => {
+    const row = sheet.getRow(i + 2);
+    row.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    const hasGap = !!src.gaps && src.lines.some((l) => src.gaps!.has(reviewInvoiceKey(l)));
+    for (let c = 1; c <= cols.length; c++) {
+      const cell = row.getCell(c);
+      cell.border = THIN_BORDER;
+      if (hasGap) {
+        cell.fill = gapFill;
+        cell.font = { color: { argb: "FF9C0006" } };
+      }
+    }
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return buffer as ArrayBuffer;
+}
+
+/** One invoice line that breaks the إضافي rule. */
+export type ExtraRuleRow = {
+  code: string;
+  name: string;
+  supplier: string;
+  invoice: string;
+  date: string;
+  /** The line's actual إضافي %. */
+  actualExtra: number;
+  /** Plain-Arabic explanation of why the line is wrong. */
+  reason: string;
+};
+
+/**
+ * إضافي-rule violations export: one row per offending invoice line, with the
+ * item code/name, invoice number, supplier and date, the actual إضافي, and a
+ * plain-Arabic reason column.
+ */
+export async function buildExtraRuleWorkbook(
+  rows: ExtraRuleRow[],
+): Promise<ArrayBuffer> {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("مخالفة إضافي", {
+    views: [{ rightToLeft: false, state: "frozen", ySplit: 1 }],
+  });
+
+  const cols: { header: string; value: (r: ExtraRuleRow) => string | number }[] =
+    [
+      { header: "كود الصنف", value: (r) => r.code },
+      { header: "اسم الصنف", value: (r) => r.name },
+      { header: "رقم الفاتورة", value: (r) => r.invoice },
+      { header: "اسم المورد", value: (r) => r.supplier || "—" },
+      { header: "التاريخ", value: (r) => r.date },
+      { header: "إضافي الفعلي", value: (r) => pctText(r.actualExtra) },
+      { header: "السبب", value: (r) => r.reason },
+    ];
+
+  sheet.columns = cols.map((c) => ({ header: c.header }));
+  for (const r of rows) sheet.addRow(cols.map((c) => c.value(r)));
+
+  // Auto-fit each column to its widest cell, clamped.
+  cols.forEach((_, idx) => {
+    const column = sheet.getColumn(idx + 1);
+    let max = 0;
+    column.eachCell({ includeEmpty: true }, (cell) => {
+      const len = String(cell.value ?? "").length;
+      if (len > max) max = len;
+    });
+    column.width = Math.min(Math.max(max + 2, 10), 60);
+  });
+
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.alignment = { horizontal: "center", vertical: "middle" };
+
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber !== 1) {
+      row.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    }
+    for (let c = 1; c <= cols.length; c++) {
+      row.getCell(c).border = THIN_BORDER;
+    }
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return buffer as ArrayBuffer;
+}
+
 /** One item in the simplified order export. */
 export type SimpleRow = { code: string; name: string; tasfya: number };
 

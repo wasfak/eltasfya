@@ -3,12 +3,25 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import * as React from "react";
-import { Home, FileSpreadsheet, ListChecks, Boxes, Landmark } from "lucide-react";
+import {
+  Home,
+  FileSpreadsheet,
+  ListChecks,
+  Boxes,
+  Landmark,
+  Snowflake,
+} from "lucide-react";
 
 import type { LucideIcon } from "lucide-react";
 import { BrandLogo } from "@/components/ui/brand-logo";
 
-type IconName = "home" | "tasfya" | "review" | "zaghloul" | "hayaa";
+type IconName =
+  | "home"
+  | "tasfya"
+  | "review"
+  | "zaghloul"
+  | "hayaa"
+  | "winter";
 
 type Item = {
   value: string;
@@ -71,6 +84,7 @@ export function NotchNav({
     review: ListChecks,
     zaghloul: Boxes,
     hayaa: Landmark,
+    winter: Snowflake,
   };
 
   const updateNotch = React.useCallback(() => {

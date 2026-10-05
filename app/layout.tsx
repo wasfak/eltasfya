@@ -8,13 +8,14 @@ const navItems: Array<{
   value: string;
   label: string;
   href: string;
-  icon: "home" | "tasfya" | "review" | "zaghloul" | "hayaa";
+  icon: "home" | "tasfya" | "review" | "zaghloul" | "hayaa" | "winter";
 }> = [
   { value: "home", label: "Home", href: "/", icon: "home" },
   { value: "tasfya", label: "التسوية", href: "/tasfya", icon: "tasfya" },
   { value: "review", label: "المراجعة", href: "/review", icon: "review" },
   { value: "zaghloul", label: "Zaghloul", href: "/zaghlol", icon: "zaghloul" },
   { value: "hayaa", label: "الهيئة", href: "/hayaa", icon: "hayaa" },
+  { value: "winter", label: "Winter", href: "/winter", icon: "winter" },
 ];
 
 export const metadata: Metadata = {

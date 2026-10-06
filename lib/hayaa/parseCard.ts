@@ -108,6 +108,7 @@ function colFor(item: PdfTextItem): Col {
 const ROW_TOLERANCE = 2;
 const DATE_RE = /^(\d{4})\/(\d{2})\/(\d{2})$/;
 const TIME_RE = /(\d{2}:\d{2})/;
+const DATE_TIME_RE = /\d{2}:\d{2}\s+(\d{4})\/(\d{2})\/(\d{2})/;
 
 /** Groups items into lines (top → bottom), each line sorted right → left. */
 function groupLines(items: PdfTextItem[]): PdfTextItem[][] {
@@ -153,7 +154,7 @@ export function splitItemName(itemName: string): {
   const productName = itemName
     .replace(/#+[A-Za-z.]*#+/g, " ")
     .replace(/#/g, " ")
-    .replace(/(مثيل|كود جديد)\s*\d+/g, " ")
+    .replace(/(مثيل|كود جديد)\s*\d+(\s*,\s*\d+)*/g, " ")
     .replace(/\d*[؀-ۿ][؀-ۿ.\d]*/g, " ")
     .replace(/\(\s*\)/g, " ")
     .replace(/\s+/g, " ")
@@ -227,14 +228,18 @@ export function parseCardPages(pages: PdfTextItem[][]): ParsedCard {
       const text = (c: Col) => (cells[c] ? joinRtl(cells[c]!) : "");
 
       // A movement line always carries a تاريخ المستند; totals/footer don't.
-      const dm = DATE_RE.exec(text("docDate"));
+      // Some cards print it clipped ("2026/07"), so fall back to the date in
+      // تاريخ / وقت الحركة ("19:15 2026/07/02").
+      const dm = (
+        DATE_RE.exec(text("docDate")) ?? DATE_TIME_RE.exec(text("time"))
+      )?.slice(1);
       if (!dm) continue;
 
       const party = text("party");
       const { area, name } = splitParty(party);
       movements.push({
         page: pageIdx + 1,
-        docDate: `${dm[1]}-${dm[2]}-${dm[3]}`,
+        docDate: `${dm[0]}-${dm[1]}-${dm[2]}`,
         time: TIME_RE.exec(text("time"))?.[1] ?? "",
         docType: text("docType"),
         docNo: text("docNo"),

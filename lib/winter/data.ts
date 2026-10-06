@@ -139,6 +139,51 @@ function mergeFamily(key: string, members: WinterItem[]): WinterItem {
 
 const total = (i: WinterItem) => i.m[0] + i.m[1] + i.m[2];
 
+// ---- Company (supplier) filter ----------------------------------------------
+
+const supplierIndex = new WeakMap<WinterItem[], Map<string, WinterItem[]>>();
+
+function bySupplier(items: WinterItem[]): Map<string, WinterItem[]> {
+  let idx = supplierIndex.get(items);
+  if (!idx) {
+    idx = new Map();
+    for (const it of items) {
+      const list = idx.get(it.supplier);
+      if (list) list.push(it);
+      else idx.set(it.supplier, [it]);
+    }
+    supplierIndex.set(items, idx);
+  }
+  return idx;
+}
+
+/**
+ * Only the items of one company (same array each call, so the family index
+ * cached per array keeps working). Empty supplier = everything.
+ */
+export function itemsOfSupplier(items: WinterItem[], supplier: string): WinterItem[] {
+  if (!supplier) return items;
+  return bySupplier(items).get(supplier) ?? [];
+}
+
+/** Every company, biggest Oct–Dec sellers first. */
+export function listSuppliers(items: WinterItem[]): string[] {
+  return [...bySupplier(items)]
+    .map(([name, list]) => ({ name, units: list.reduce((s, i) => s + total(i), 0) }))
+    .sort((a, b) => b.units - a.units)
+    .map((s) => s.name);
+}
+
+/** A company's best sellers (all items, not only winter), or their families. */
+export function topOfSupplier(items: WinterItem[], family: boolean, n = 100): WinterItem[] {
+  if (!family) return items.slice(0, n); // already sorted by total
+  const fams = familiesOf(items);
+  return [...fams]
+    .map(([k, members]) => mergeFamily(k, members))
+    .sort((a, b) => total(b) - total(a))
+    .slice(0, n);
+}
+
 /** The top 50 best-selling winter-related items (or families) over Oct–Dec. */
 export function topWinter(items: WinterItem[], family: boolean, n = 50): WinterItem[] {
   const winter = items.filter((i) => i.cat);

@@ -5,6 +5,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Building2,
   ChevronLeft,
   ChevronRight,
   Link2,
@@ -14,6 +15,7 @@ import {
   Snowflake,
   TrendingDown,
   TrendingUp,
+  X,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -128,7 +130,29 @@ export function WinterClient() {
   // Results are shown PAGE_SIZE rows at a time.
   const [page, setPage] = React.useState(0);
 
-  const active = top || query.trim() !== "";
+  // Company filter. `companyInput` is what's typed; `company` is applied only
+  // once it exactly matches a known company (or is cleared).
+  const [companies, setCompanies] = React.useState<string[]>([]);
+  const [companyInput, setCompanyInput] = React.useState("");
+  const [company, setCompany] = React.useState("");
+
+  React.useEffect(() => {
+    fetch("/api/winter?suppliers=1")
+      .then((r) => r.json())
+      .then((d: { suppliers: string[] }) => setCompanies(d.suppliers))
+      .catch(() => {});
+  }, []);
+
+  const companySet = React.useMemo(() => new Set(companies), [companies]);
+
+  const pickCompany = (value: string) => {
+    setCompanyInput(value);
+    const v = value.trim();
+    if (!v) setCompany("");
+    else if (companySet.has(v)) setCompany(v);
+  };
+
+  const active = top || query.trim() !== "" || company !== "";
 
   const sorted = React.useMemo(() => {
     if (!sort) return results;
@@ -162,15 +186,17 @@ export function WinterClient() {
 
   React.useEffect(() => {
     const q = query.trim();
-    if (!top && !q) return;
+    if (!top && !q && !company) return;
     const ctrl = new AbortController();
     const t = setTimeout(async () => {
       setLoading(true);
       try {
-        const res = await fetch(
-          `/api/winter?${top ? "top=1" : `q=${encodeURIComponent(q)}`}${family ? "&family=1" : ""}`,
-          { signal: ctrl.signal },
-        );
+        const params = new URLSearchParams();
+        if (top) params.set("top", "1");
+        else if (q) params.set("q", q);
+        if (family) params.set("family", "1");
+        if (company) params.set("supplier", company);
+        const res = await fetch(`/api/winter?${params}`, { signal: ctrl.signal });
         if (!res.ok) throw new Error(String(res.status));
         const data = (await res.json()) as { results: WinterItem[] };
         setResults(data.results);
@@ -186,7 +212,7 @@ export function WinterClient() {
       clearTimeout(t);
       ctrl.abort();
     };
-  }, [query, family, top]);
+  }, [query, family, top, company]);
 
   return (
     <div className="space-y-4">
@@ -231,9 +257,49 @@ export function WinterClient() {
         </Button>
       </div>
 
-      {!top && active && searched && results.length === 0 && !loading && (
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Building2 className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <input
+            list="winter-companies"
+            value={companyInput}
+            onChange={(e) => pickCompany(e.target.value)}
+            placeholder="Filter by company…"
+            dir="auto"
+            className={cn(
+              "h-10 w-full rounded-lg border bg-background pl-9 pr-9 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              company && "border-primary",
+            )}
+          />
+          <datalist id="winter-companies">
+            {companies.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+          {companyInput && (
+            <button
+              type="button"
+              onClick={() => pickCompany("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label="Clear company filter"
+            >
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
+      </div>
+      {companyInput.trim() && !company && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          Pick a company from the list to apply the filter.
+        </p>
+      )}
+
+      {active && (searched || company) && results.length === 0 && !loading && (
         <p className="text-sm text-muted-foreground">
-          No sales found for &ldquo;{searched}&rdquo; in Oct–Dec 2025.
+          {top
+            ? "No winter-related sales"
+            : `No sales${searched ? ` for “${searched}”` : ""}`}
+          {company && <> for <span dir="auto">{company}</span></>} in Oct–Dec 2025.
         </p>
       )}
 
@@ -245,6 +311,11 @@ export function WinterClient() {
             </span>
           )}
           {!top && `${results.length} `}
+          {company && (
+            <span className="font-medium text-foreground" dir="auto">
+              {company}{" "}
+            </span>
+          )}
           {family ? "famil" : "item"}
           {family
             ? results.length === 1 ? "y" : "ies"
@@ -336,7 +407,7 @@ export function WinterClient() {
             <span>
               {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, sorted.length)} of{" "}
               {sorted.length}
-              {!top && results.length >= 50 &&
+              {!top && searched && results.length >= 50 &&
                 " (top 50 matches — refine the search to narrow it down)"}
             </span>
             {pageCount > 1 && (

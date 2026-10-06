@@ -144,6 +144,19 @@ const LAYOUTS: Record<ReportStyle, Column[]> = {
   ],
 };
 
+/** Cell values of each report row, as they appear in the Excel sheet. */
+export function reportRowValues(
+  card: ParsedCard,
+  rows: ReportRow[],
+  { style, manufacturer }: ReportOptions,
+): Cell[][] {
+  const columns = LAYOUTS[style];
+  const item = card.productName || card.itemName;
+  return rows.map((r, i) =>
+    columns.map((c) => c.value({ r, i, item, maker: manufacturer })),
+  );
+}
+
 const thin = { style: "thin" } as const;
 const BORDER = { top: thin, left: thin, bottom: thin, right: thin };
 

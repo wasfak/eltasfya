@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
-  CheckCircle2,
   ClipboardCopy,
   Download,
   Eye,
@@ -26,6 +25,16 @@ import {
   type ReportSelection,
   type ReportStyle,
 } from "@/lib/hayaa/report";
+import {
+  playChime,
+  saveAllReports,
+  saveViaBrowser,
+  toTsv,
+} from "@/lib/hayaa/saveFiles";
+import {
+  DownloadDoneBanner,
+  ReportSettings,
+} from "@/components/hayaa/report-settings";
 
 type ParseState =
   | { status: "loading" }
@@ -56,35 +65,6 @@ function formatSize(bytes: number): string {
 function formatDate(iso: string): string {
   const [y, m, d] = iso.split("-");
   return `${Number(d)}/${Number(m)}/${y}`;
-}
-
-/** Short two-note chime so a finished download is noticed even off-screen. */
-function playChime() {
-  try {
-    const ctx = new AudioContext();
-    [880, 1320].forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      const t = ctx.currentTime + i * 0.18;
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.exponentialRampToValueAtTime(0.25, t + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(t);
-      osc.stop(t + 0.4);
-    });
-    setTimeout(() => ctx.close(), 1000);
-  } catch {
-    // no audio available — the banner is enough
-  }
-}
-
-/** Tab-separated text that pastes into Google Sheets as cells. */
-function toTsv(rows: Array<Array<string | number>>): string {
-  return rows
-    .map((r) => r.map((v) => String(v).replace(/[\t\r\n]+/g, " ")).join("\t"))
-    .join("\n");
 }
 
 function cardPeriod(card: ParsedCard): string {
@@ -154,64 +134,20 @@ export default function HayaaPage() {
     return { name: xlsxName(file.name), buffer };
   }
 
-  function saveViaBrowser(name: string, buffer: ArrayBuffer) {
-    const blob = new Blob([buffer], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
   async function downloadReport(file: File) {
     const report = await buildReport(file);
     if (report) saveViaBrowser(report.name, report.buffer);
   }
 
-  /**
-   * Asks for a folder once and writes every Excel into it. Browsers without
-   * the folder picker (Firefox/Safari) fall back to one download per file.
-   */
   async function downloadAll() {
-    const win = window as unknown as {
-      showDirectoryPicker?: (opts: {
-        mode: "readwrite";
-      }) => Promise<FileSystemDirectoryHandle>;
-    };
-
-    let dir: FileSystemDirectoryHandle | null = null;
-    if (win.showDirectoryPicker) {
-      try {
-        dir = await win.showDirectoryPicker({ mode: "readwrite" });
-      } catch {
-        return; // user cancelled the folder picker
-      }
-    }
-
     setDownloading(true);
     setDownloadDone(null);
-    let count = 0;
     try {
-      for (const file of files) {
-        const report = await buildReport(file);
-        if (!report) continue;
-        count++;
-        if (dir) {
-          const handle = await dir.getFileHandle(report.name, { create: true });
-          const writable = await handle.createWritable();
-          await writable.write(report.buffer);
-          await writable.close();
-        } else {
-          saveViaBrowser(report.name, report.buffer);
-          // Browsers drop rapid back-to-back downloads; space them out.
-          await new Promise((r) => setTimeout(r, 400));
-        }
+      const done = await saveAllReports(files.map((f) => () => buildReport(f)));
+      if (done) {
+        setDownloadDone(done);
+        playChime();
       }
-      setDownloadDone({ count, folder: dir?.name ?? null });
-      playChime();
     } finally {
       setDownloading(false);
     }
@@ -391,112 +327,16 @@ export default function HayaaPage() {
 
       {/* Excel export settings */}
       {files.length > 0 && (
-        <div className="space-y-4 rounded-xl border border-border p-4">
-          <h2 className="font-semibold">تحميل Excel</h2>
-
-          <div className="space-y-2">
-            <p className="text-sm font-medium">1. اختر شكل الشيت</p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {(
-                [
-                  [
-                    "gaptin",
-                    "GAPTIN",
-                    "14 عمود · GLN المخزن · Batch · الرخصة · GLN الصيدلية · التاريخ 10/8/2026",
-                    "بيتم اضافة الكود المكانى لكل فرع",
-                  ],
-                  [
-                    "averozolid",
-                    "AVEROZOLID",
-                    "10 أعمدة · اسم الفرع المورد · بدون GLN · التاريخ 2026/08/14",
-                    null,
-                  ],
-                ] as const
-              ).map(([value, title, desc, note]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setStyle(value)}
-                  className={cn(
-                    "rounded-lg border-2 border-border p-3 text-start transition-colors hover:bg-muted/40",
-                    style === value && "border-primary bg-muted/60",
-                  )}
-                >
-                  <p dir="ltr" className="text-end font-semibold">
-                    {title}
-                  </p>
-                  <p className="text-xs text-muted-foreground">{desc}</p>
-                  {note && (
-                    <p className="mt-1.5 text-sm font-bold text-foreground">
-                      {note}
-                    </p>
-                  )}
-                </button>
-              ))}
-            </div>
-            {!style && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                اختر شكل الشيت قبل التحميل.
-              </p>
-            )}
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-4">
-            <label className="space-y-1 text-sm sm:col-span-2">
-              <span className="font-medium">الشركة صاحبة المستحضر</span>
-              <input
-                value={manufacturer}
-                onChange={(e) => setManufacturer(e.target.value)}
-                disabled={!style}
-                className="h-9 w-full rounded-md border border-border bg-background px-3 disabled:opacity-50"
-              />
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">من تاريخ</span>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="h-9 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">إلى تاريخ</span>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="h-9 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="font-medium">أقصى عدد فروع في اليوم</span>
-              <input
-                type="number"
-                min={1}
-                value={maxPerDay}
-                onChange={(e) => setMaxPerDay(Number(e.target.value) || 1)}
-                className="h-9 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <div className="flex items-end text-xs text-muted-foreground sm:col-span-3">
-              {dateFrom || dateTo ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDateFrom("");
-                    setDateTo("");
-                  }}
-                  className="underline hover:text-foreground"
-                >
-                  إلغاء الفترة (تحميل كل ما في الملف)
-                </button>
-              ) : (
-                "بدون تحديد فترة = كل التواريخ الموجودة في الملف."
-              )}
-            </div>
-          </div>
-        </div>
+        <ReportSettings
+          value={{ style, manufacturer, maxPerDay, dateFrom, dateTo }}
+          onChange={(p) => {
+            if (p.style !== undefined) setStyle(p.style);
+            if (p.manufacturer !== undefined) setManufacturer(p.manufacturer);
+            if (p.maxPerDay !== undefined) setMaxPerDay(p.maxPerDay);
+            if (p.dateFrom !== undefined) setDateFrom(p.dateFrom);
+            if (p.dateTo !== undefined) setDateTo(p.dateTo);
+          }}
+        />
       )}
 
       {/* File list with per-file summary */}
@@ -539,30 +379,10 @@ export default function HayaaPage() {
             </div>
           </div>
           {downloadDone && (
-            <div className="flex items-center gap-3 border-b-2 border-emerald-500 bg-emerald-100 px-4 py-4 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">
-              <CheckCircle2 className="size-8 shrink-0" />
-              <div className="flex-1">
-                <p className="text-lg font-bold">
-                  تم الانتهاء من التحميل — {downloadDone.count} ملف
-                </p>
-                {downloadDone.folder && (
-                  <p className="text-sm">
-                    تم الحفظ في فولدر:{" "}
-                    <span dir="auto" className="font-semibold">
-                      {downloadDone.folder}
-                    </span>
-                  </p>
-                )}
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setDownloadDone(null)}
-                aria-label="إغلاق"
-              >
-                <X />
-              </Button>
-            </div>
+            <DownloadDoneBanner
+              done={downloadDone}
+              onClose={() => setDownloadDone(null)}
+            />
           )}
           <ul className="divide-y divide-border">
             {files.map((file, idx) => {

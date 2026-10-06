@@ -136,10 +136,30 @@ function joinRtl(items: PdfTextItem[]): string {
   );
 }
 
-function splitParty(party: string): { area: string; name: string } {
+export function splitParty(party: string): { area: string; name: string } {
   const i = party.indexOf("-");
   if (i < 0) return { area: "", name: party };
   return { area: party.slice(0, i).trim(), name: party.slice(i + 1).trim() };
+}
+
+/** Latin product name and تشغيلات price tag out of a full item name. */
+export function splitItemName(itemName: string): {
+  productName: string;
+  priceTag: string;
+} {
+  // Drop markers (#B#, ##F#, #ع##…), "مثيل/كود جديد <code>", and every Arabic
+  // run with digits glued to it (also takes the price tag); what's left is
+  // the Latin product name.
+  const productName = itemName
+    .replace(/#+[A-Za-z.]*#+/g, " ")
+    .replace(/#/g, " ")
+    .replace(/(مثيل|كود جديد)\s*\d+/g, " ")
+    .replace(/\d*[؀-ۿ][؀-ۿ.\d]*/g, " ")
+    .replace(/\(\s*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const tag = /ت\.([جق])\s*(\d*)/.exec(itemName);
+  return { productName, priceTag: tag ? `ت.${tag[1]}${tag[2]}` : "" };
 }
 
 /* ------------------------------------------------------------------ */
@@ -231,13 +251,7 @@ export function parseCardPages(pages: PdfTextItem[][]): ParsedCard {
     }
   });
 
-  const productName =
-    itemName
-      .match(/[A-Z][A-Z0-9 .\/%+-]*/g)
-      ?.sort((a, b) => b.length - a.length)[0]
-      ?.trim() ?? "";
-  const tag = /ت\.([جق])\s*(\d*)/.exec(itemName);
-  const priceTag = tag ? `ت.${tag[1]}${tag[2]}` : "";
+  const { productName, priceTag } = splitItemName(itemName);
 
   return {
     code,

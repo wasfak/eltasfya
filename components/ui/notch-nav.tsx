@@ -10,6 +10,7 @@ import {
   Boxes,
   Landmark,
   Snowflake,
+  Upload,
 } from "lucide-react";
 
 import type { LucideIcon } from "lucide-react";
@@ -21,7 +22,8 @@ type IconName =
   | "review"
   | "zaghloul"
   | "hayaa"
-  | "winter";
+  | "winter"
+  | "upload";
 
 type Item = {
   value: string;
@@ -85,6 +87,7 @@ export function NotchNav({
     zaghloul: Boxes,
     hayaa: Landmark,
     winter: Snowflake,
+    upload: Upload,
   };
 
   const updateNotch = React.useCallback(() => {

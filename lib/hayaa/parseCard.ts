@@ -153,10 +153,13 @@ export function splitItemName(itemName: string): {
   // the Latin product name.
   const productName = itemName
     .replace(/#+[A-Za-z.]*#+/g, " ")
-    .replace(/#/g, " ")
+    .replace(/[A-Za-z.]*#+[A-Za-z.]*/g, " ")
     .replace(/(مثيل|كود جديد)\s*\d+(\s*,\s*\d+)*/g, " ")
+    // Bare item codes ("126210 -") and the parens/dash left around them.
+    .replace(/\b\d{6,}(\s*,\s*\d{6,})*\b/g, " ")
     .replace(/\d*[؀-ۿ][؀-ۿ.\d]*/g, " ")
-    .replace(/\(\s*\)/g, " ")
+    .replace(/\(\s*\)|\)\s*\(/g, " ")
+    .replace(/^[\s\-]+|[\s\-]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
   const tag = /ت\.([جق])\s*(\d*)/.exec(itemName);

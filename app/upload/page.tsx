@@ -144,7 +144,7 @@ export default function UploadPage() {
   // Codes picked for export (in pick order) and the batch typed for each.
   const [picked, setPicked] = useState<string[]>([]);
   const [batches, setBatches] = useState<Record<string, string>>({});
-  // Max qty per sheet row, per code ("" = no cap), and the "for all" box.
+  // Max total qty in each code's sheet ("" = no cap), and the "for all" box.
   const [caps, setCaps] = useState<Record<string, string>>({});
   const [capAll, setCapAll] = useState("");
   const [settings, setSettings] = useState<ReportSettingsValue>({
@@ -461,17 +461,27 @@ export default function UploadPage() {
         to: dateTo || undefined,
       });
       const fullQty = all.rows.reduce((s, r) => s + r.movement.qtyOut, 0);
-      // Cap: no sheet row sells more than the cap — bigger rows are cut down to it.
+      // Cap on the sheet's total qty: rows in date order until the total
+      // reaches the cap; the row that crosses it is cut down to the
+      // remainder, later rows are dropped.
       const cap = Number(caps[code]);
-      const rows =
-        caps[code]?.trim() && cap >= 0
-          ? all.rows.map((r) =>
-              r.movement.qtyOut > cap
-                ? { ...r, movement: { ...r.movement, qtyOut: cap } }
-                : r,
-            )
-          : all.rows;
-      const qty = rows.reduce((s, r) => s + r.movement.qtyOut, 0);
+      let rows = all.rows;
+      let qty = fullQty;
+      if (caps[code]?.trim() && cap >= 0 && fullQty > cap) {
+        rows = [];
+        qty = 0;
+        for (const r of all.rows) {
+          const left = Math.round((cap - qty) * 1000) / 1000;
+          if (left <= 0) break;
+          const take = Math.min(r.movement.qtyOut, left);
+          rows.push(
+            take === r.movement.qtyOut
+              ? r
+              : { ...r, movement: { ...r.movement, qtyOut: take } },
+          );
+          qty += take;
+        }
+      }
       const sel = { ...all, rows };
       return [{ item, card, sel, qty, fullQty, batch }];
     });
@@ -1010,7 +1020,7 @@ export default function UploadPage() {
               </span>
               <div className="flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  حد الكمية للصف (للكل)
+                  حد إجمالي الكمية لكل شيت
                   <input
                     type="number"
                     min={0}
@@ -1078,7 +1088,7 @@ export default function UploadPage() {
               <table className="w-full text-sm">
                 <thead className="bg-muted/50">
                   <tr>
-                    {["م", "الكود", "الصنف", "الباتش", "حد الكمية للصف", "صفوف في الشيت", "الكمية المباعة", ""].map(
+                    {["م", "الكود", "الصنف", "الباتش", "حد إجمالي الكمية", "صفوف في الشيت", "الكمية المباعة", ""].map(
                       (h, i) => (
                         <th
                           key={i}

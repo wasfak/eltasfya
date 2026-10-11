@@ -286,3 +286,69 @@ export function itemToCard(
     movements,
   };
 }
+
+export type MergedHtm = {
+  htm: ParsedHtm;
+  /** Lines skipped because an earlier file already had their document. */
+  duplicateLines: number;
+};
+
+/**
+ * Combines several parsed files into one. A document (doc no + date) that
+ * appears in more than one file — overlapping periods — is kept only from the
+ * first file, so quantities are never counted twice. Each item's lines are
+ * re-sorted by date/time, since the report rules depend on that order.
+ */
+export function mergeHtms(files: ParsedHtm[]): MergedHtm {
+  const merged: ParsedHtm = {
+    movementType: files.find((f) => f.movementType)?.movementType ?? "",
+    from: "",
+    to: "",
+    items: new Map(),
+    docs: 0,
+    lines: 0,
+    docsTotal: 0,
+    reportTotal: null,
+    unknownRows: 0,
+    unknownSamples: [],
+  };
+  const docOwner = new Map<string, number>();
+  let duplicateLines = 0;
+
+  files.forEach((file, fi) => {
+    if (file.from && (!merged.from || file.from < merged.from)) merged.from = file.from;
+    if (file.to && file.to > merged.to) merged.to = file.to;
+    merged.unknownRows += file.unknownRows;
+
+    for (const item of file.items.values()) {
+      let target = merged.items.get(item.code);
+      for (const line of item.lines) {
+        const key = `${line.doc.docNo}|${line.doc.docDate}`;
+        const owner = docOwner.get(key);
+        if (owner === undefined) {
+          docOwner.set(key, fi);
+          merged.docs++;
+          merged.docsTotal += line.doc.amount;
+        } else if (owner !== fi) {
+          duplicateLines++;
+          continue;
+        }
+        if (!target) {
+          target = { ...item, lines: [] };
+          merged.items.set(item.code, target);
+        }
+        target.lines.push(line);
+        merged.lines++;
+      }
+    }
+  });
+
+  for (const item of merged.items.values()) {
+    item.lines.sort((a, b) =>
+      a.doc.docDate === b.doc.docDate
+        ? a.doc.time.localeCompare(b.doc.time)
+        : a.doc.docDate.localeCompare(b.doc.docDate),
+    );
+  }
+  return { htm: merged, duplicateLines };
+}

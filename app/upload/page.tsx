@@ -4,14 +4,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
+  CheckCheck,
   CheckCircle2,
   ClipboardCopy,
+  Bookmark,
+  BookmarkCheck,
+  Building2,
+  Database,
   Download,
   FileCode2,
   Loader2,
   Minus,
   Plus,
+  Save,
   Search,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -20,10 +27,26 @@ import { cn } from "@/lib/utils";
 import { matchBranch } from "@/lib/hayaa/branches";
 import {
   itemToCard,
+  mergeHtms,
   parseMovementHtm,
   type HtmItem,
   type ParsedHtm,
 } from "@/lib/hayaa/parseHtm";
+import { parseStockHtm } from "@/lib/hayaa/parseStock";
+import {
+  clearStock,
+  loadStock,
+  mergeStock,
+  requestPersistentStorage,
+  type StoredStockItem,
+} from "@/lib/hayaa/stockStore";
+import {
+  clearSavedPicks,
+  loadSavedPicks,
+  productKey,
+  saveSavedPicks,
+  type SavedPick,
+} from "@/lib/hayaa/savedPicks";
 import {
   buildReportWorkbook,
   reportRowValues,
@@ -42,11 +65,17 @@ import {
   type ReportSettingsValue,
 } from "@/components/hayaa/report-settings";
 
-type State =
-  | { status: "idle" }
-  | { status: "loading"; file: File; progress: number }
-  | { status: "done"; file: File; htm: ParsedHtm; ms: number }
-  | { status: "error"; file: File; message: string };
+/** The file being parsed right now, out of the batch the user dropped. */
+type Loading = { file: File; progress: number; index: number; total: number };
+
+/** A message about one file of the batch (rejected, already loaded). */
+type Notice = { kind: "error" | "info"; text: string };
+
+/** A movement file loaded this session (not saved — re-uploaded each visit). */
+type LoadedHtm = { id: string; name: string; size: number; htm: ParsedHtm };
+
+/** Company filter value for report codes the stock list doesn't know. */
+const NO_COMPANY = "__none__";
 
 /** How many items the list renders at once (the file can hold thousands). */
 const LIST_LIMIT = 200;
@@ -89,17 +118,35 @@ function xlsxName(item: HtmItem): string {
   return `${name.replace(/[\\/:*?"<>|#]+/g, " ").replace(/\s+/g, " ").trim()}.xlsx`;
 }
 
+
 export default function UploadPage() {
-  const [state, setState] = useState<State>({ status: "idle" });
+  const [files, setFiles] = useState<LoadedHtm[]>([]);
+  const [loading, setLoading] = useState<Loading | null>(null);
+  const [notices, setNotices] = useState<Notice[]>([]);
   const [dragging, setDragging] = useState(false);
   const [query, setQuery] = useState("");
+  const [company, setCompany] = useState("");
   const [showPicked, setShowPicked] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // code → company from the stock files, saved in the browser; null while loading.
+  const [stock, setStock] = useState<Map<string, StoredStockItem> | null>(null);
+  const [stockBusy, setStockBusy] = useState(false);
+  const [stockNotice, setStockNotice] = useState<Notice | null>(null);
+  const stockInputRef = useRef<HTMLInputElement>(null);
+
+  // Picks saved in the browser, to mark again on a later upload; null while loading.
+  const [saved, setSaved] = useState<SavedPick[] | null>(null);
+  const [savedNotice, setSavedNotice] = useState<Notice | null>(null);
+  const [autoApply, setAutoApply] = useState(false);
+
   // Codes picked for export (in pick order) and the batch typed for each.
   const [picked, setPicked] = useState<string[]>([]);
   const [batches, setBatches] = useState<Record<string, string>>({});
+  // Max qty per sheet row, per code ("" = no cap), and the "for all" box.
+  const [caps, setCaps] = useState<Record<string, string>>({});
+  const [capAll, setCapAll] = useState("");
   const [settings, setSettings] = useState<ReportSettingsValue>({
     style: null,
     manufacturer: "",
@@ -124,36 +171,175 @@ export default function UploadPage() {
     };
   }, [downloadDone]);
 
-  async function load(file: File) {
-    if (!isHtm(file)) {
-      setState({ status: "error", file, message: "الملف ليس htm" });
-      return;
-    }
-    setSelected(null);
-    setQuery("");
-    clearPicked();
+  // Read back the saved stock list, and ask the browser to never evict it.
+  useEffect(() => {
+    loadStock()
+      .then(setStock)
+      .catch((e) => {
+        setStock(new Map());
+        setStockNotice({
+          kind: "error",
+          text: `تعذرت قراءة الأرصدة المحفوظة: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      });
+    loadSavedPicks()
+      .then(setSaved)
+      .catch(() => setSaved([]))
+      .finally(() => {
+        try {
+          setAutoApply(localStorage.getItem("hayaa-auto-picks") === "1");
+        } catch {
+          // no storage — the toggle just starts off
+        }
+      });
+    requestPersistentStorage();
+  }, []);
+
+  async function loadFiles(dropped: File[]) {
+    if (!dropped.length || loading) return;
     setDownloadDone(null);
-    setState({ status: "loading", file, progress: 0 });
-    const started = performance.now();
-    try {
-      const htm = await parseMovementHtm(file, (progress) =>
-        setState({ status: "loading", file, progress }),
-      );
-      setState({ status: "done", file, htm, ms: performance.now() - started });
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setState({ status: "error", file, message });
+    const out: Notice[] = [];
+    const known = new Set(files.map((f) => f.id));
+    const added: LoadedHtm[] = [];
+
+    for (const [index, file] of dropped.entries()) {
+      if (!isHtm(file)) {
+        out.push({ kind: "error", text: `${file.name}: الملف ليس htm` });
+        continue;
+      }
+      const id = `${file.name}|${file.size}|${file.lastModified}`;
+      if (known.has(id)) {
+        out.push({ kind: "info", text: `${file.name}: مرفوع بالفعل — تم تخطيه` });
+        continue;
+      }
+      setLoading({ file, progress: 0, index, total: dropped.length });
+      try {
+        const htm = await parseMovementHtm(file, (progress) =>
+          setLoading({ file, progress, index, total: dropped.length }),
+        );
+        known.add(id);
+        const loaded = { id, name: file.name, size: file.size, htm };
+        added.push(loaded);
+        setFiles((f) => [...f, loaded]);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        out.push({ kind: "error", text: `تعذرت قراءة ${file.name}: ${message}` });
+      }
+    }
+    setLoading(null);
+    setNotices(out);
+    // Mark the saved codes in the new data, if the user wants that.
+    if (autoApply && added.length && saved?.length) {
+      const all = mergeHtms([...files, ...added].map((f) => f.htm)).htm;
+      applySaved(saved, [...all.items.values()]);
     }
   }
 
-  const htm = state.status === "done" ? state.htm : null;
+  function removeFile(id: string) {
+    const remaining = files.filter((f) => f.id !== id);
+    setFiles(remaining);
+    // Drop picks whose code no longer exists in the remaining files.
+    const codes = new Set(remaining.flatMap((f) => [...f.htm.items.keys()]));
+    setPicked((p) => p.filter((c) => codes.has(c)));
+    setSelected((c) => (c && codes.has(c) ? c : null));
+    setDownloadDone(null);
+  }
+
+  function removeAll() {
+    setFiles([]);
+    setNotices([]);
+    setQuery("");
+    setCompany("");
+    clearPicked();
+    setSelected(null);
+    setDownloadDone(null);
+  }
+
+  async function uploadStock(dropped: File[]) {
+    if (!dropped.length || stockBusy) return;
+    setStockBusy(true);
+    setStockNotice(null);
+    try {
+      let added = 0;
+      let updated = 0;
+      let skipped = 0;
+      for (const file of dropped) {
+        if (!isHtm(file)) throw new Error(`${file.name}: الملف ليس htm`);
+        const parsed = await parseStockHtm(file);
+        await mergeStock(parsed.items);
+        skipped += parsed.skipped;
+        for (const i of parsed.items) {
+          if (stock?.has(i.code)) updated++;
+          else added++;
+        }
+      }
+      setStock(await loadStock());
+      setStockNotice({
+        kind: skipped ? "error" : "info",
+        text:
+          `تم حفظ الأرصدة: ${fmt(added)} كود جديد · ${fmt(updated)} تم تحديثه` +
+          (skipped ? ` · ${fmt(skipped)} صف بدون كود لم يُقرأ` : ""),
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setStockNotice({ kind: "error", text: `تعذر حفظ الأرصدة: ${message}` });
+    } finally {
+      setStockBusy(false);
+    }
+  }
+
+  async function removeStock() {
+    if (!window.confirm("حذف كل الأرصدة المحفوظة (الأكواد والشركات)؟")) return;
+    try {
+      await clearStock();
+      setStock(new Map());
+      setCompany("");
+      setStockNotice(null);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setStockNotice({ kind: "error", text: `تعذر الحذف: ${message}` });
+    }
+  }
+
+  const merged = useMemo(
+    () => (files.length ? mergeHtms(files.map((f) => f.htm)) : null),
+    [files],
+  );
+  const htm = merged?.htm ?? null;
+  const movementTypes = useMemo(
+    () => new Set(files.map((f) => f.htm.movementType)),
+    [files],
+  );
+
+  const companyOf = (code: string) => stock?.get(code)?.company ?? "";
+  /** The item name exactly as the stock file has it (else as the movement file has it). */
+  const nameOf = (item: HtmItem) => stock?.get(item.code)?.itemName || item.itemName;
+
+  const stockCompanies = useMemo(
+    () => new Set([...(stock?.values() ?? [])].map((i) => i.company)).size,
+    [stock],
+  );
 
   const items = useMemo(() => {
     if (!htm) return [];
     return [...htm.items.values()].sort((a, b) =>
-      displayName(a).localeCompare(displayName(b)),
+      (stock?.get(a.code)?.itemName || a.itemName).localeCompare(
+        stock?.get(b.code)?.itemName || b.itemName,
+      ),
     );
-  }, [htm]);
+  }, [htm, stock]);
+
+  /** Companies of the report's codes, with how many codes each has. */
+  const companies = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const i of items) {
+      const c = stock?.get(i.code)?.company || NO_COMPANY;
+      counts.set(c, (counts.get(c) ?? 0) + 1);
+    }
+    return [...counts].sort(([a], [b]) =>
+      a === NO_COMPANY ? 1 : b === NO_COMPANY ? -1 : a.localeCompare(b),
+    );
+  }, [items, stock]);
 
   const selectedItem = selected ? htm?.items.get(selected) ?? null : null;
   const pickedSet = useMemo(() => new Set(picked), [picked]);
@@ -161,23 +347,104 @@ export default function UploadPage() {
   const pickedOnly = showPicked && picked.length > 0;
 
   const filtered = useMemo(() => {
-    const base = pickedOnly ? items.filter((i) => pickedSet.has(i.code)) : items;
+    let base = pickedOnly ? items.filter((i) => pickedSet.has(i.code)) : items;
+    if (company) {
+      base = base.filter(
+        (i) => (stock?.get(i.code)?.company || NO_COMPANY) === company,
+      );
+    }
     const q = query.trim().toUpperCase();
     if (!q) return base;
     return base.filter(
-      (i) => i.code.includes(q) || i.itemName.toUpperCase().includes(q),
+      (i) =>
+        i.code.includes(q) ||
+        i.itemName.toUpperCase().includes(q) ||
+        (stock?.get(i.code)?.itemName.toUpperCase().includes(q) ?? false) ||
+        (stock?.get(i.code)?.company.toUpperCase().includes(q) ?? false),
     );
-  }, [items, query, pickedOnly, pickedSet]);
+  }, [items, query, company, stock, pickedOnly, pickedSet]);
 
   function clearPicked() {
     setPicked([]);
     setShowPicked(false);
   }
 
+  /** Picks every item the search / company filter currently shows. */
+  function markAll() {
+    setPicked((p) => {
+      const have = new Set(p);
+      return [...p, ...filtered.map((i) => i.code).filter((c) => !have.has(c))];
+    });
+  }
+
   function togglePick(code: string) {
     setPicked((p) =>
       p.includes(code) ? p.filter((c) => c !== code) : [...p, code],
     );
+  }
+
+  /** Marks the saved codes, plus new price-generation codes of the same product. */
+  function applySaved(list: SavedPick[] = saved ?? [], within: HtmItem[] = items) {
+    if (!list.length || !within.length) return;
+    const codes = new Set(list.map((p) => p.code));
+    const keys = new Set(list.map((p) => productKey(p.productName)).filter(Boolean));
+    const hits = within.filter(
+      (i) => codes.has(i.code) || (!!i.productName && keys.has(productKey(i.productName))),
+    );
+    const found = new Set(hits.flatMap((i) => [i.code, productKey(i.productName)]));
+    const missing = list.filter(
+      (p) => !found.has(p.code) && !found.has(productKey(p.productName)),
+    ).length;
+    setPicked((p) => [...p, ...hits.map((i) => i.code).filter((c) => !p.includes(c))]);
+    setSavedNotice({
+      kind: "info",
+      text:
+        `تم تحديد ${fmt(hits.length)} صنف من المحفوظ` +
+        (missing ? ` · ${fmt(missing)} كود محفوظ غير موجود في الملفات` : ""),
+    });
+  }
+
+  async function savePicks() {
+    if (!htm || !picked.length) return;
+    if (
+      saved?.length &&
+      !window.confirm(`استبدال الأكواد المحفوظة (${saved.length}) بالمختار الحالي (${picked.length})؟`)
+    ) {
+      return;
+    }
+    const list = picked.map((code) => ({
+      code,
+      productName: htm.items.get(code)?.productName ?? "",
+    }));
+    try {
+      await saveSavedPicks(list);
+      setSaved(list);
+      setSavedNotice({ kind: "info", text: `تم حفظ ${fmt(list.length)} كود` });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setSavedNotice({ kind: "error", text: `تعذر الحفظ: ${message}` });
+    }
+  }
+
+  async function removeSaved() {
+    if (!window.confirm("حذف الأكواد المحفوظة؟")) return;
+    try {
+      await clearSavedPicks();
+      setSaved([]);
+      setSavedNotice(null);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setSavedNotice({ kind: "error", text: `تعذر الحذف: ${message}` });
+    }
+  }
+
+  function toggleAutoApply(on: boolean) {
+    setAutoApply(on);
+    try {
+      localStorage.setItem("hayaa-auto-picks", on ? "1" : "0");
+    } catch {
+      // not remembered — fine for this session
+    }
   }
 
   /** Each picked code as a hayaa card + the rows that go in its sheet. */
@@ -189,14 +456,26 @@ export default function UploadPage() {
       if (!item) return [];
       const batch = batches[code]?.trim() ?? "";
       const card = itemToCard(htm, item, batch);
-      const sel = selectReportRows(card, Math.max(1, maxPerDay), {
+      const all = selectReportRows(card, Math.max(1, maxPerDay), {
         from: dateFrom || undefined,
         to: dateTo || undefined,
       });
-      const qty = sel.rows.reduce((s, r) => s + r.movement.qtyOut, 0);
-      return [{ item, card, sel, qty, batch }];
+      const fullQty = all.rows.reduce((s, r) => s + r.movement.qtyOut, 0);
+      // Cap: no sheet row sells more than the cap — bigger rows are cut down to it.
+      const cap = Number(caps[code]);
+      const rows =
+        caps[code]?.trim() && cap >= 0
+          ? all.rows.map((r) =>
+              r.movement.qtyOut > cap
+                ? { ...r, movement: { ...r.movement, qtyOut: cap } }
+                : r,
+            )
+          : all.rows;
+      const qty = rows.reduce((s, r) => s + r.movement.qtyOut, 0);
+      const sel = { ...all, rows };
+      return [{ item, card, sel, qty, fullQty, batch }];
     });
-  }, [htm, picked, batches, settings]);
+  }, [htm, picked, batches, caps, settings]);
 
   type Export = (typeof exports)[number];
 
@@ -266,24 +545,73 @@ export default function UploadPage() {
     );
   }
 
-  const totalsOk =
-    htm?.reportTotal != null &&
-    Math.abs(htm.docsTotal - htm.reportTotal) < 0.05;
-
   return (
-    <div dir="rtl" className="mx-auto w-full max-w-7xl space-y-5 p-6">
+    <div dir="rtl" className="mx-auto w-full max-w-[1800px] space-y-5 p-4 sm:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3 border-b pb-3">
         <h1 className="text-2xl font-bold tracking-tight">رفع سجل الحركة</h1>
-        {state.status !== "idle" && state.status !== "loading" && (
-          <Button variant="outline" onClick={() => setState({ status: "idle" })}>
+        {files.length > 0 && !loading && (
+          <Button variant="outline" onClick={removeAll}>
             <X />
-            مسح
+            مسح الملفات
           </Button>
         )}
       </div>
 
+      {/* Stock list (code → company), saved in the browser */}
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border p-3 text-sm">
+        <Building2 className="size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">ملف الأرصدة (الشركات)</p>
+          <p className="text-xs text-muted-foreground">
+            {stock === null
+              ? "جاري التحميل..."
+              : stock.size === 0
+                ? "لا توجد أرصدة محفوظة — ارفع ملف الأرصدة لربط الأكواد بالشركات."
+                : `محفوظ: ${fmt(stock.size)} كود · ${fmt(stockCompanies)} شركة`}
+          </p>
+          {stockNotice && (
+            <p
+              className={cn(
+                "text-xs",
+                stockNotice.kind === "error"
+                  ? "text-red-600 dark:text-red-400"
+                  : "text-emerald-700 dark:text-emerald-400",
+              )}
+            >
+              {stockNotice.text}
+            </p>
+          )}
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={stock === null || stockBusy}
+          onClick={() => stockInputRef.current?.click()}
+        >
+          {stockBusy ? <Loader2 className="animate-spin" /> : <Upload />}
+          رفع ملف الأرصدة
+        </Button>
+        {stock && stock.size > 0 && (
+          <Button size="sm" variant="ghost" onClick={removeStock}>
+            <Trash2 />
+            حذف الأرصدة
+          </Button>
+        )}
+        <input
+          ref={stockInputRef}
+          type="file"
+          multiple
+          accept=".htm,.html,text/html"
+          className="hidden"
+          onChange={(e) => {
+            uploadStock([...(e.target.files ?? [])]);
+            e.target.value = "";
+          }}
+        />
+      </div>
+
       {/* Drop zone */}
-      {state.status !== "loading" && (
+      {!loading && (
         <div
           role="button"
           tabIndex={0}
@@ -299,8 +627,7 @@ export default function UploadPage() {
           onDrop={(e) => {
             e.preventDefault();
             setDragging(false);
-            const file = e.dataTransfer.files[0];
-            if (file) load(file);
+            loadFiles([...e.dataTransfer.files]);
           }}
           className={cn(
             "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border p-10 text-center transition-colors hover:bg-muted/40",
@@ -309,23 +636,28 @@ export default function UploadPage() {
         >
           <Upload className="size-8 text-muted-foreground" />
           <p className="font-medium">
-            {htm ? "اختر ملف آخر" : "اسحب ملف htm هنا أو اضغط للاختيار"}
+            {htm
+              ? "أضف ملفات htm أخرى"
+              : "اسحب ملفات htm هنا أو اضغط للاختيار"}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            يمكن اختيار أكثر من ملف
           </p>
           <input
             ref={inputRef}
             type="file"
+            multiple
             accept=".htm,.html,text/html"
             className="hidden"
             onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) load(file);
+              loadFiles([...(e.target.files ?? [])]);
               e.target.value = "";
             }}
           />
         </div>
       )}
 
-      {state.status === "loading" && (
+      {loading && (
         <div
           role="status"
           className="flex flex-col items-center gap-4 rounded-xl border-2 border-primary/40 bg-muted/40 p-10 text-center"
@@ -333,51 +665,116 @@ export default function UploadPage() {
           <Loader2 className="size-12 animate-spin text-primary" />
           <div className="space-y-1">
             <p className="text-lg font-semibold">
-              جاري قراءة الملف... برجاء الانتظار
+              جاري قراءة الملف
+              {loading.total > 1 && ` ${loading.index + 1} من ${loading.total}`}
+              ... برجاء الانتظار
             </p>
             <p dir="auto" className="text-sm text-muted-foreground">
-              {state.file.name}
+              {loading.file.name}
             </p>
           </div>
           <div className="h-3 w-full max-w-xl overflow-hidden rounded-full bg-muted">
             <div
               className="h-full rounded-full bg-primary transition-[width] duration-200"
-              style={{ width: `${Math.round(state.progress * 100)}%` }}
+              style={{ width: `${Math.round(loading.progress * 100)}%` }}
             />
           </div>
           <p className="text-2xl font-bold tabular-nums">
-            {Math.round(state.progress * 100)}%
+            {Math.round(loading.progress * 100)}%
           </p>
           <p className="text-sm tabular-nums text-muted-foreground">
-            {formatSize(state.file.size * state.progress)} من{" "}
-            {formatSize(state.file.size)}
+            {formatSize(loading.file.size * loading.progress)} من{" "}
+            {formatSize(loading.file.size)}
           </p>
         </div>
       )}
 
-      {state.status === "error" && (
-        <p className="flex items-center gap-2 text-sm text-red-600 dark:text-red-400">
-          <AlertCircle className="size-4" />
-          تعذرت قراءة {state.file.name}: {state.message}
-        </p>
+      {notices.length > 0 && (
+        <div className="space-y-1">
+          {notices.map((n, i) => (
+            <p
+              key={i}
+              dir="auto"
+              className={cn(
+                "flex items-center gap-2 text-sm",
+                n.kind === "error"
+                  ? "text-red-600 dark:text-red-400"
+                  : "text-muted-foreground",
+              )}
+            >
+              <AlertCircle className="size-4 shrink-0" />
+              {n.text}
+            </p>
+          ))}
+        </div>
       )}
 
-      {/* Summary */}
-      {state.status === "done" && htm && (
+      {/* Loaded files + merged summary */}
+      {files.length > 0 && htm && merged && (
         <div className="space-y-3 rounded-xl border border-border p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <FileCode2 className="size-4 text-muted-foreground" />
-            <span dir="auto" className="font-semibold">
-              {state.file.name}
-            </span>
-            <span className="text-sm text-muted-foreground">
-              {formatSize(state.file.size)} · قُرئ في {fmt(state.ms / 1000, 1)} ث
-            </span>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="flex items-center gap-2 font-semibold">
+              <Database className="size-4 text-muted-foreground" />
+              الملفات المرفوعة ({files.length})
+            </p>
           </div>
-          <div className="grid gap-3 text-sm sm:grid-cols-2">
+
+          <ul className="divide-y divide-border rounded-lg border border-border">
+            {files.map((s) => {
+              // A totals gap comes from SofTech's own sums (shown below in grey), not from us.
+              const ok = s.htm.unknownRows === 0;
+              return (
+                <li key={s.id} className="space-y-1 px-3 py-2 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
+                    <span dir="auto" className="font-medium">
+                      {s.name}
+                    </span>
+                    <span className="text-xs tabular-nums text-muted-foreground">
+                      {formatSize(s.size)} · {formatDate(s.htm.from)} →{" "}
+                      {formatDate(s.htm.to)} · {fmt(s.htm.docs)} مستند ·{" "}
+                      {fmt(s.htm.lines)} سطر
+                    </span>
+                    {ok ? (
+                      <CheckCircle2
+                        className="size-4 text-emerald-600 dark:text-emerald-400"
+                        aria-label="تمت قراءة الملف بالكامل"
+                      />
+                    ) : (
+                      <AlertCircle className="size-4 text-red-600 dark:text-red-400" />
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="ms-auto"
+                      onClick={() => removeFile(s.id)}
+                      aria-label={`حذف ${s.name}`}
+                    >
+                      <X />
+                    </Button>
+                  </div>
+                  {s.htm.unknownRows > 0 && (
+                    <div className="space-y-0.5 text-xs text-red-600 dark:text-red-400">
+                      <p className="font-medium">
+                        {fmt(s.htm.unknownRows)} صف غير مفهوم — قد تكون بعض الحركات ناقصة.
+                      </p>
+                      {s.htm.unknownSamples.map((vals, i) => (
+                        <p key={i} dir="auto">
+                          {vals.join(" | ")}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="grid gap-3 text-sm sm:grid-cols-3">
             {[
               ["نوع الحركة", htm.movementType || "—"],
-              ["الفترة", `${formatDate(htm.from)} → ${formatDate(htm.to)}`],
+              ["الفترة (كل الملفات)", `${formatDate(htm.from)} → ${formatDate(htm.to)}`],
+              ["الإجمالي", `${fmt(htm.items.size)} صنف · ${fmt(htm.lines)} سطر`],
             ].map(([label, value]) => (
               <div key={label} className="rounded-lg bg-muted/50 p-3">
                 <p className="text-xs text-muted-foreground">{label}</p>
@@ -385,30 +782,15 @@ export default function UploadPage() {
               </div>
             ))}
           </div>
-          {htm.unknownRows === 0 ? (
-            <p className="flex items-center gap-1.5 text-sm text-emerald-700 dark:text-emerald-400">
-              <CheckCircle2 className="size-4" />
-              تمت قراءة كل صفوف الملف — لا يوجد صف غير مفهوم.
-            </p>
-          ) : (
-            <div className="space-y-1 text-sm text-red-600 dark:text-red-400">
-              <p className="flex items-center gap-1.5 font-medium">
-                <AlertCircle className="size-4" />
-                {fmt(htm.unknownRows)} صف غير مفهوم — قد تكون بعض الحركات ناقصة.
-              </p>
-              {htm.unknownSamples.map((vals, i) => (
-                <p key={i} dir="auto" className="text-xs">
-                  {vals.join(" | ")}
-                </p>
-              ))}
-            </div>
-          )}
-          {htm.reportTotal != null && (
+          {merged.duplicateLines > 0 && (
             <p className="text-xs text-muted-foreground">
-              إجمالي التقرير {fmt(htm.reportTotal, 2)}
-              {totalsOk
-                ? " — مطابق لمجموع المستندات."
-                : ` — الفرق عن مجموع المستندات ${fmt(htm.reportTotal - htm.docsTotal, 2)} (من حسابات SofTech نفسها، لا يؤثر على الكميات).`}
+              تم تجاهل {fmt(merged.duplicateLines)} سطر مكرر (نفس المستند موجود في
+              أكثر من ملف) — كل مستند محسوب مرة واحدة.
+            </p>
+          )}
+          {movementTypes.size > 1 && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              الملفات فيها أكثر من نوع حركة: {[...movementTypes].join("، ")}
             </p>
           )}
         </div>
@@ -416,18 +798,36 @@ export default function UploadPage() {
 
       {/* Item picker + detail */}
       {htm && (
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <div className="rounded-xl border border-border">
             <div className="border-b border-border p-3">
-              <label className="relative block">
-                <Search className="pointer-events-none absolute top-1/2 start-3 size-4 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="ابحث بالكود أو اسم الصنف"
-                  className="h-9 w-full rounded-md border border-border bg-background ps-9 pe-3"
-                />
-              </label>
+              <div className="flex flex-wrap gap-2">
+                <label className="relative block min-w-40 flex-1">
+                  <Search className="pointer-events-none absolute top-1/2 start-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="ابحث بالكود أو اسم الصنف أو الشركة"
+                    className="h-9 w-full rounded-md border border-border bg-background ps-9 pe-3"
+                  />
+                </label>
+                <select
+                  value={company}
+                  onChange={(e) => setCompany(e.target.value)}
+                  aria-label="فلتر الشركة"
+                  className={cn(
+                    "h-9 max-w-52 rounded-md border border-border bg-background px-2",
+                    company && "border-primary",
+                  )}
+                >
+                  <option value="">كل الشركات</option>
+                  {companies.map(([c, n]) => (
+                    <option key={c} value={c}>
+                      {c === NO_COMPANY ? "بدون شركة" : c} ({fmt(n)})
+                    </option>
+                  ))}
+                </select>
+              </div>
               <p className="mt-2 text-xs text-muted-foreground">
                 {fmt(filtered.length)} صنف
                 {filtered.length > LIST_LIMIT &&
@@ -454,15 +854,89 @@ export default function UploadPage() {
                   صنف
                   {pickedOnly && " · عرض الكل"}
                 </button>
+                <div className="flex flex-wrap gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={markAll}
+                    disabled={filtered.every((i) => pickedSet.has(i.code))}
+                    title="تحديد كل الأصناف الظاهرة حسب البحث وفلتر الشركة"
+                  >
+                    <CheckCheck />
+                    تحديد الكل ({fmt(filtered.length)})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={clearPicked}
+                    disabled={picked.length === 0}
+                  >
+                    <X />
+                    إلغاء تحديد الكل
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-dashed border-border px-3 py-1.5 text-sm">
+                <Bookmark className="size-4 shrink-0 text-muted-foreground" />
+                <span className="me-auto">
+                  المحفوظ:{" "}
+                  <span className="font-semibold tabular-nums">
+                    {fmt(saved?.length ?? 0)}
+                  </span>{" "}
+                  كود
+                </span>
                 <Button
                   size="sm"
-                  variant="ghost"
-                  onClick={clearPicked}
-                  disabled={picked.length === 0}
+                  variant="outline"
+                  onClick={() => applySaved()}
+                  disabled={!saved?.length}
+                  title="تحديد الأكواد المحفوظة (وأكوادها الجديدة بعد تغيير السعر)"
                 >
-                  <X />
-                  إلغاء تحديد الكل
+                  <BookmarkCheck />
+                  تحديد المحفوظ
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={savePicks}
+                  disabled={picked.length === 0}
+                  title="حفظ الأصناف المختارة لتحديدها في ملفات لاحقة"
+                >
+                  <Save />
+                  حفظ المختار
+                </Button>
+                {!!saved?.length && (
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={removeSaved}
+                    aria-label="حذف الأكواد المحفوظة"
+                    title="حذف الأكواد المحفوظة"
+                  >
+                    <Trash2 />
+                  </Button>
+                )}
+                <label className="flex w-full items-center gap-1.5 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={autoApply}
+                    onChange={(e) => toggleAutoApply(e.target.checked)}
+                    className="size-3.5 accent-primary"
+                  />
+                  تحديد المحفوظ تلقائياً عند رفع ملف
+                </label>
+                {savedNotice && (
+                  <p
+                    className={cn(
+                      "w-full text-xs",
+                      savedNotice.kind === "error"
+                        ? "text-red-600 dark:text-red-400"
+                        : "text-emerald-700 dark:text-emerald-400",
+                    )}
+                  >
+                    {savedNotice.text}
+                  </p>
+                )}
               </div>
             </div>
             <ul className="max-h-[32rem] divide-y divide-border overflow-y-auto">
@@ -472,25 +946,31 @@ export default function UploadPage() {
                   onClick={() => setSelected(item.code)}
                   className={cn(
                     "flex cursor-pointer items-center gap-3 px-3 py-2 text-sm transition-colors hover:bg-muted/40",
-                    selected === item.code && "bg-muted/60",
+                    selected === item.code &&
+                      "bg-primary/10 shadow-[inset_-3px_0_0_var(--color-primary)]",
                   )}
                 >
                   <input
                     type="checkbox"
                     checked={pickedSet.has(item.code)}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={() => togglePick(item.code)}
+                    onChange={() => {
+                      togglePick(item.code);
+                      setSelected(item.code);
+                    }}
                     aria-label={`اختيار ${item.code} للتصدير`}
                     className="size-4 shrink-0 accent-primary"
                   />
                   <span className="w-16 shrink-0 tabular-nums font-medium">
                     {item.code}
                   </span>
-                  <span dir="ltr" className="min-w-0 flex-1 truncate text-start">
-                    {displayName(item)}
-                  </span>
-                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                    {item.lines.length} سطر · {fmt(itemQty(item), 2)}
+                  <span className="min-w-0 flex-1">
+                    <span dir="ltr" className="block truncate text-start">
+                      {nameOf(item)}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {companyOf(item.code) || "—"}
+                    </span>
                   </span>
                 </li>
               ))}
@@ -501,6 +981,8 @@ export default function UploadPage() {
             {selectedItem ? (
               <ItemDetail
                 item={selectedItem}
+                name={nameOf(selectedItem)}
+                company={companyOf(selectedItem.code)}
                 picked={pickedSet.has(selectedItem.code)}
                 onTogglePick={() => togglePick(selectedItem.code)}
               />
@@ -526,7 +1008,26 @@ export default function UploadPage() {
               <span className="text-sm font-medium">
                 الأصناف المختارة ({picked.length})
               </span>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  حد الكمية للصف (للكل)
+                  <input
+                    type="number"
+                    min={0}
+                    inputMode="decimal"
+                    value={capAll}
+                    onChange={(ev) => {
+                      const v = ev.target.value;
+                      setCapAll(v);
+                      setCaps((c) => ({
+                        ...c,
+                        ...Object.fromEntries(picked.map((code) => [code, v])),
+                      }));
+                    }}
+                    placeholder="بدون حد"
+                    className="h-8 w-24 rounded-md border border-border bg-background px-2 text-center text-sm tabular-nums text-foreground"
+                  />
+                </label>
                 <Button size="sm" variant="ghost" onClick={clearPicked}>
                   <X />
                   إلغاء الاختيار
@@ -577,7 +1078,7 @@ export default function UploadPage() {
               <table className="w-full text-sm">
                 <thead className="bg-muted/50">
                   <tr>
-                    {["م", "الكود", "الصنف", "الباتش", "صفوف في الشيت", "الكمية المباعة", ""].map(
+                    {["م", "الكود", "الصنف", "الباتش", "حد الكمية للصف", "صفوف في الشيت", "الكمية المباعة", ""].map(
                       (h, i) => (
                         <th
                           key={i}
@@ -602,7 +1103,12 @@ export default function UploadPage() {
                         {e.item.code}
                       </td>
                       <td className="px-3 py-2">
-                        <span dir="ltr">{displayName(e.item)}</span>
+                        <span dir="ltr">{nameOf(e.item)}</span>
+                        {companyOf(e.item.code) && (
+                          <span className="ms-2 text-xs text-muted-foreground">
+                            {companyOf(e.item.code)}
+                          </span>
+                        )}
                         {e.sel.unmatched.size > 0 && (
                           <p className="text-xs text-amber-600 dark:text-amber-400">
                             غير موجود في ملف الفروع (لن يظهر في الشيت):{" "}
@@ -631,11 +1137,33 @@ export default function UploadPage() {
                           )}
                         />
                       </td>
+                      <td className="px-3 py-2 text-center">
+                        <input
+                          type="number"
+                          min={0}
+                          inputMode="decimal"
+                          value={caps[e.item.code] ?? ""}
+                          onChange={(ev) =>
+                            setCaps((c) => ({
+                              ...c,
+                              [e.item.code]: ev.target.value,
+                            }))
+                          }
+                          placeholder="بدون حد"
+                          aria-label={`حد الكمية لـ ${e.item.code}`}
+                          className="h-8 w-24 rounded-md border border-border bg-background px-2 text-center tabular-nums"
+                        />
+                      </td>
                       <td className="px-3 py-2 text-center tabular-nums">
                         {e.sel.rows.length}
                       </td>
-                      <td className="px-3 py-2 text-center font-semibold tabular-nums">
-                        {fmt(e.qty, 2)}
+                      <td className="px-3 py-2 text-center tabular-nums">
+                        <span className="font-semibold">{fmt(e.qty, 2)}</span>
+                        {e.qty !== e.fullQty && (
+                          <span className="block text-xs text-muted-foreground">
+                            من {fmt(e.fullQty, 2)}
+                          </span>
+                        )}
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 text-center">
                         <Button
@@ -661,7 +1189,7 @@ export default function UploadPage() {
                 </tbody>
                 <tfoot className="bg-muted/50 font-bold">
                   <tr>
-                    <td colSpan={5} className="px-3 py-2 text-start">
+                    <td colSpan={6} className="px-3 py-2 text-start">
                       الإجمالي
                     </td>
                     <td className="px-3 py-2 text-center tabular-nums">
@@ -681,10 +1209,14 @@ export default function UploadPage() {
 
 function ItemDetail({
   item,
+  name,
+  company,
   picked,
   onTogglePick,
 }: {
   item: HtmItem;
+  name: string;
+  company: string;
   picked: boolean;
   onTogglePick: () => void;
 }) {
@@ -700,7 +1232,7 @@ function ItemDetail({
           <p className="flex flex-wrap items-baseline gap-2">
             <span className="font-semibold tabular-nums">{item.code}</span>
             <span dir="ltr" className="font-semibold">
-              {displayName(item)}
+              {name}
             </span>
           </p>
           <Button
@@ -713,7 +1245,7 @@ function ItemDetail({
           </Button>
         </div>
         <p className="text-sm text-muted-foreground">
-          {item.lines.length} حركة · الكمية {fmt(qty, 2)}
+          {company || "بدون شركة"} · {item.lines.length} حركة · الكمية {fmt(qty, 2)}
           {unmatched > 0 && (
             <span className="text-amber-600 dark:text-amber-400">
               {" "}
@@ -726,11 +1258,14 @@ function ItemDetail({
         <table className="w-full text-sm">
           <thead className="sticky top-0 bg-muted">
             <tr>
-              {["م", "التاريخ", "الوقت", "رقم المستند", "جهة التعامل", "الكمية", "المستخدم"].map(
+              {["م", "التاريخ", "الوقت", "رقم المستند", "جهة التعامل", "الكمية"].map(
                 (h) => (
                   <th
                     key={h}
-                    className="whitespace-nowrap border-b border-border px-3 py-2 text-center text-xs font-semibold text-muted-foreground"
+                    className={cn(
+                      "whitespace-nowrap border-b border-border px-3 py-2 text-xs font-semibold text-muted-foreground",
+                      h === "جهة التعامل" ? "text-start" : "text-center",
+                    )}
                   >
                     {h}
                   </th>
@@ -755,25 +1290,21 @@ function ItemDetail({
                   <td className="px-3 py-2 text-center tabular-nums">{l.doc.time}</td>
                   <td className="px-3 py-2 text-center tabular-nums">{l.doc.docNo}</td>
                   <td
-                    dir="auto"
                     className={cn(
-                      "whitespace-nowrap px-3 py-2",
+                      "whitespace-nowrap px-3 py-2 text-start",
                       !matched && "text-amber-600 dark:text-amber-400",
                     )}
                     title={matched ? undefined : "غير موجود في ملف الفروع"}
                   >
                     {l.doc.partyArea && (
                       <span className="text-muted-foreground">
-                        {l.doc.partyArea} -{" "}
+                        <bdi>{l.doc.partyArea}</bdi> -{" "}
                       </span>
                     )}
-                    {l.doc.partyName}
+                    <bdi>{l.doc.partyName}</bdi>
                   </td>
                   <td className="px-3 py-2 text-center font-semibold tabular-nums">
                     {fmt(l.qty, 2)}
-                  </td>
-                  <td dir="ltr" className="px-3 py-2 text-center text-xs text-muted-foreground">
-                    {l.doc.user}
                   </td>
                 </tr>
               );

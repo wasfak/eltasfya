@@ -49,6 +49,7 @@ import {
 } from "@/lib/hayaa/savedPicks";
 import {
   buildReportWorkbook,
+  capReportRows,
   reportRowValues,
   selectReportRows,
 } from "@/lib/hayaa/report";
@@ -461,27 +462,8 @@ export default function UploadPage() {
         to: dateTo || undefined,
       });
       const fullQty = all.rows.reduce((s, r) => s + r.movement.qtyOut, 0);
-      // Cap on the sheet's total qty: rows in date order until the total
-      // reaches the cap; the row that crosses it is cut down to the
-      // remainder, later rows are dropped.
-      const cap = Number(caps[code]);
-      let rows = all.rows;
-      let qty = fullQty;
-      if (caps[code]?.trim() && cap >= 0 && fullQty > cap) {
-        rows = [];
-        qty = 0;
-        for (const r of all.rows) {
-          const left = Math.round((cap - qty) * 1000) / 1000;
-          if (left <= 0) break;
-          const take = Math.min(r.movement.qtyOut, left);
-          rows.push(
-            take === r.movement.qtyOut
-              ? r
-              : { ...r, movement: { ...r.movement, qtyOut: take } },
-          );
-          qty += take;
-        }
-      }
+      const rows = capReportRows(all.rows, caps[code] ?? "");
+      const qty = rows.reduce((s, r) => s + r.movement.qtyOut, 0);
       const sel = { ...all, rows };
       return [{ item, card, sel, qty, fullQty, batch }];
     });
@@ -492,7 +474,7 @@ export default function UploadPage() {
   const downloadable = exports.filter((e) => e.sel.rows.length > 0).length;
   const grandQty = exports.reduce((s, e) => s + e.qty, 0);
   const missingBatch =
-    settings.style === "gaptin" &&
+    !!settings.style &&
     exports.some((e) => e.sel.rows.length > 0 && !e.batch);
 
   async function buildReport(e: Export): Promise<Report | null> {
@@ -535,9 +517,7 @@ export default function UploadPage() {
     const { style, manufacturer } = settings;
     if (!style) return;
     const all = exports.flatMap((e) =>
-      reportRowValues(e.card, e.sel.rows, { style, manufacturer }).map((row) =>
-        row.slice(1),
-      ),
+      reportRowValues(e.card, e.sel.rows, { style, manufacturer }),
     );
     copyText(toTsv(all), "rows");
   }
@@ -1081,7 +1061,7 @@ export default function UploadPage() {
             )}
             {missingBatch && (
               <p className="border-b border-border px-4 py-2 text-sm text-amber-600 dark:text-amber-400">
-                شيت GAPTIN فيه عمود Batch — اكتب الباتش للأصناف الفاضية.
+                الشيت فيه عمود Batch — اكتب الباتش للأصناف الفاضية.
               </p>
             )}
             <div className="overflow-x-auto">
@@ -1141,7 +1121,7 @@ export default function UploadPage() {
                           placeholder="Batch"
                           className={cn(
                             "h-8 w-32 rounded-md border border-border bg-background px-2 text-center tabular-nums",
-                            settings.style === "gaptin" &&
+                            !!settings.style &&
                               !e.batch &&
                               "border-amber-500",
                           )}

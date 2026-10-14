@@ -19,6 +19,7 @@ import { readFileAsArrayBuffer } from "@/lib/tasfya/orderExcel";
 import { parseCardPdf, type ParsedCard } from "@/lib/hayaa/parseCard";
 import {
   buildReportWorkbook,
+  capReportRows,
   reportRowValues,
   selectReportRows,
   TRANSFER_OUT,
@@ -67,6 +68,16 @@ function formatDate(iso: string): string {
   return `${Number(d)}/${Number(m)}/${y}`;
 }
 
+/** Batches of the card's transfer rows, in first-seen order, with their qty. */
+function cardBatches(card: ParsedCard): Array<{ batch: string; qty: number }> {
+  const qty = new Map<string, number>();
+  for (const m of card.movements) {
+    if (m.docType !== TRANSFER_OUT) continue;
+    qty.set(m.batch, (qty.get(m.batch) ?? 0) + m.qtyOut);
+  }
+  return [...qty].map(([batch, q]) => ({ batch, qty: q }));
+}
+
 function cardPeriod(card: ParsedCard): string {
   if (!card.movements.length) return "—";
   const dates = card.movements.map((m) => m.docDate).sort();
@@ -88,6 +99,11 @@ export default function HayaaPage() {
   const [maxPerDay, setMaxPerDay] = useState(10);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Max total الكمية المباعة in each file's sheet ("" = no cap), and the "for all" box.
+  const [caps, setCaps] = useState<Record<string, string>>({});
+  const [capAll, setCapAll] = useState("");
+  // Batches picked per file; none picked = export every batch.
+  const [batchPicks, setBatchPicks] = useState<Record<string, string[]>>({});
   const [downloading, setDownloading] = useState(false);
   // Result of the last "download all" (shown as a big confirmation banner).
   const [downloadDone, setDownloadDone] = useState<{
@@ -106,18 +122,33 @@ export default function HayaaPage() {
     };
   }, [downloadDone]);
 
-  /** Report rows per parsed file, under the current settings. */
+  /**
+   * Report rows per parsed file, under the current settings and the file's
+   * qty cap; `fullQty` is the total before the cap.
+   */
   const selections = useMemo(() => {
-    const out: Record<string, ReportSelection> = {};
+    const out: Record<string, ReportSelection & { fullQty: number }> = {};
     for (const [key, state] of Object.entries(parsed)) {
       if (state.status !== "done") continue;
-      out[key] = selectReportRows(state.card, Math.max(1, maxPerDay), {
+      const picks = batchPicks[key] ?? [];
+      const card = picks.length
+        ? {
+            ...state.card,
+            movements: state.card.movements.filter((m) => picks.includes(m.batch)),
+          }
+        : state.card;
+      const sel = selectReportRows(card, Math.max(1, maxPerDay), {
         from: dateFrom || undefined,
         to: dateTo || undefined,
       });
+      out[key] = {
+        ...sel,
+        rows: capReportRows(sel.rows, caps[key] ?? ""),
+        fullQty: sel.rows.reduce((s, r) => s + r.movement.qtyOut, 0),
+      };
     }
     return out;
-  }, [parsed, maxPerDay, dateFrom, dateTo]);
+  }, [parsed, maxPerDay, dateFrom, dateTo, caps, batchPicks]);
 
   /** The finished Excel for one file, or null if it has nothing to export. */
   async function buildReport(
@@ -169,6 +200,8 @@ export default function HayaaPage() {
         card: state.card,
         rows: sel.rows.length,
         qty: sel.rows.reduce((s, r) => s + r.movement.qtyOut, 0),
+        fullQty: sel.fullQty,
+        batches: cardBatches(state.card),
       },
     ];
   });
@@ -193,7 +226,7 @@ export default function HayaaPage() {
         style,
         manufacturer,
       });
-      all.push(...values.map((row) => row.slice(1)));
+      all.push(...values);
     }
     copyText(toTsv(all), "rows");
   }
@@ -241,15 +274,30 @@ export default function HayaaPage() {
     added.forEach(parseFile);
   }
 
+  function toggleBatch(key: string, batch: string) {
+    setBatchPicks((p) => {
+      const cur = p[key] ?? [];
+      return {
+        ...p,
+        [key]: cur.includes(batch) ? cur.filter((b) => b !== batch) : [...cur, batch],
+      };
+    });
+  }
+
   function removeFile(key: string) {
     setFiles((prev) => prev.filter((f) => fileKey(f) !== key));
     setParsed(({ [key]: _, ...rest }) => rest);
+    setCaps(({ [key]: _, ...rest }) => rest);
+    setBatchPicks(({ [key]: _, ...rest }) => rest);
     if (selected === key) setSelected(null);
   }
 
   function clearAll() {
     setFiles([]);
     setParsed({});
+    setCaps({});
+    setBatchPicks({});
+    setCapAll("");
     setSelected(null);
   }
 
@@ -489,19 +537,40 @@ export default function HayaaPage() {
             <span className="text-sm font-medium">
               إجمالي الكمية المباعة لكل صنف
             </span>
-            <Button size="sm" variant="outline" onClick={copyTotals}>
-              {copied === "totals" ? <Check /> : <ClipboardCopy />}
-              {copied === "totals" ? "تم النسخ" : "نسخ الإجماليات"}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                حد إجمالي الكمية لكل شيت
+                <input
+                  type="number"
+                  min={0}
+                  inputMode="decimal"
+                  value={capAll}
+                  onChange={(ev) => {
+                    const v = ev.target.value;
+                    setCapAll(v);
+                    setCaps((c) => ({
+                      ...c,
+                      ...Object.fromEntries(totals.map((t) => [t.key, v])),
+                    }));
+                  }}
+                  placeholder="بدون حد"
+                  className="h-8 w-24 rounded-md border border-border bg-background px-2 text-center text-sm tabular-nums text-foreground"
+                />
+              </label>
+              <Button size="sm" variant="outline" onClick={copyTotals}>
+                {copied === "totals" ? <Check /> : <ClipboardCopy />}
+                {copied === "totals" ? "تم النسخ" : "نسخ الإجماليات"}
+              </Button>
+            </div>
           </div>
           <table className="w-full text-sm">
             <thead className="bg-muted/50">
               <tr>
-                {["م", "الكود", "الصنف", "عدد الصفوف", "الكمية المباعة"].map(
+                {["م", "الكود", "الصنف", "الباتش", "حد إجمالي الكمية", "عدد الصفوف", "الكمية المباعة"].map(
                   (h) => (
                     <th
                       key={h}
-                      className="border-b border-border px-3 py-2 text-center text-xs font-semibold text-muted-foreground"
+                      className="border-b border-border px-3 py-2 text-center text-sm font-bold text-foreground"
                     >
                       {h}
                     </th>
@@ -531,18 +600,73 @@ export default function HayaaPage() {
                       </span>
                     )}
                   </td>
+                  <td className="px-3 py-2">
+                    {t.batches.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {t.batches.map(({ batch, qty }) => {
+                          const on = batchPicks[t.key]?.includes(batch) ?? false;
+                          return (
+                            <button
+                              key={batch}
+                              type="button"
+                              onClick={() => toggleBatch(t.key, batch)}
+                              title={`${qty.toLocaleString("en-US")} منصرف`}
+                              className={cn(
+                                "rounded-md border border-border px-2 py-0.5 text-xs tabular-nums transition-colors hover:bg-muted",
+                                on &&
+                                  "border-primary bg-primary text-primary-foreground hover:bg-primary/90",
+                              )}
+                            >
+                              {batch || "بدون باتش"}
+                              <span className="ms-1 opacity-70">
+                                ({qty.toLocaleString("en-US")})
+                              </span>
+                            </button>
+                          );
+                        })}
+                        <span className="text-xs text-muted-foreground">
+                          {batchPicks[t.key]?.length
+                            ? "المختار فقط"
+                            : "الكل"}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <input
+                      type="number"
+                      min={0}
+                      inputMode="decimal"
+                      value={caps[t.key] ?? ""}
+                      onChange={(ev) =>
+                        setCaps((c) => ({ ...c, [t.key]: ev.target.value }))
+                      }
+                      placeholder="بدون حد"
+                      aria-label={`حد الكمية لـ ${t.card.code}`}
+                      className="h-8 w-24 rounded-md border border-border bg-background px-2 text-center tabular-nums"
+                    />
+                  </td>
                   <td className="px-3 py-2 text-center tabular-nums">
                     {t.rows}
                   </td>
-                  <td className="px-3 py-2 text-center font-semibold tabular-nums">
-                    {t.qty.toLocaleString("en-US")}
+                  <td className="px-3 py-2 text-center tabular-nums">
+                    <span className="font-semibold">
+                      {t.qty.toLocaleString("en-US")}
+                    </span>
+                    {t.qty !== t.fullQty && (
+                      <span className="block text-xs text-muted-foreground">
+                        من {t.fullQty.toLocaleString("en-US")}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
             <tfoot className="bg-muted/50 font-bold">
               <tr>
-                <td colSpan={4} className="px-3 py-2 text-start">
+                <td colSpan={6} className="px-3 py-2 text-start">
                   الإجمالي
                 </td>
                 <td className="px-3 py-2 text-center tabular-nums">

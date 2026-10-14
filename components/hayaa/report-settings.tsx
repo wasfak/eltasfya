@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, X } from "lucide-react";
+import { CheckCircle2, ExternalLink, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ReportStyle } from "@/lib/hayaa/report";
@@ -19,12 +19,14 @@ const STYLES = [
     "GAPTIN",
     "14 عمود · GLN المخزن · Batch · الرخصة · GLN الصيدلية · التاريخ 10/8/2026",
     "بيتم اضافة الكود المكانى لكل فرع",
+    null,
   ],
   [
     "averozolid",
-    "AVEROZOLID",
-    "10 أعمدة · اسم الفرع المورد · بدون GLN · التاريخ 2026/08/14",
+    "مضادات حيوية",
+    "10 أعمدة · العنوان · الكود المكانى · Batch · التاريخ 2026/08/14",
     null,
+    "https://docs.google.com/spreadsheets/d/1f_JN2LAG_tNmMPblBHTl5quCjH2xTI7BNk9i0RchAM4/edit?gid=0#gid=0",
   ],
 ] as const;
 
@@ -44,24 +46,37 @@ export function ReportSettings({
       <div className="space-y-2">
         <p className="text-sm font-medium">1. اختر شكل الشيت</p>
         <div className="grid gap-3 sm:grid-cols-2">
-          {STYLES.map(([key, title, desc, note]) => (
-            <button
+          {STYLES.map(([key, title, desc, note, link]) => (
+            <div
               key={key}
-              type="button"
-              onClick={() => onChange({ style: key })}
               className={cn(
-                "rounded-lg border-2 border-border p-3 text-start transition-colors hover:bg-muted/40",
+                "flex flex-col rounded-lg border-2 border-border transition-colors hover:bg-muted/40",
                 style === key && "border-primary bg-muted/60",
               )}
             >
-              <p dir="ltr" className="text-end font-semibold">
-                {title}
-              </p>
-              <p className="text-xs text-muted-foreground">{desc}</p>
-              {note && (
-                <p className="mt-1.5 text-sm font-bold text-foreground">{note}</p>
+              <button
+                type="button"
+                onClick={() => onChange({ style: key })}
+                className="flex-1 p-3 text-start"
+              >
+                <p className="font-semibold">{title}</p>
+                <p className="text-xs text-muted-foreground">{desc}</p>
+                {note && (
+                  <p className="mt-1.5 text-sm font-bold text-foreground">{note}</p>
+                )}
+              </button>
+              {link && (
+                <a
+                  href={link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 border-t border-border px-3 py-2 text-sm font-medium text-primary hover:underline"
+                >
+                  <ExternalLink className="size-4" />
+                  فتح شيت جوجل
+                </a>
               )}
-            </button>
+            </div>
           ))}
         </div>
         {!style && (

@@ -15,7 +15,8 @@ const navItems: Array<{
     | "zaghloul"
     | "hayaa"
     | "winter"
-    | "upload";
+    | "upload"
+    | "orders";
 }> = [
   { value: "home", label: "Home", href: "/", icon: "home" },
   { value: "tasfya", label: "التسوية", href: "/tasfya", icon: "tasfya" },
@@ -24,6 +25,8 @@ const navItems: Array<{
   { value: "hayaa", label: "الهيئة", href: "/hayaa", icon: "hayaa" },
   { value: "winter", label: "Winter", href: "/winter", icon: "winter" },
   { value: "upload", label: "Upload", href: "/upload", icon: "upload" },
+  // Hidden for now — the /orders page still works by URL.
+  // { value: "orders", label: "Order reviews", href: "/orders", icon: "orders" },
 ];
 
 export const metadata: Metadata = {

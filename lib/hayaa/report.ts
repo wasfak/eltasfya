@@ -78,6 +78,30 @@ export function selectReportRows(
   return { rows, unmatched };
 }
 
+/**
+ * Caps the sheet's total الكمية المباعة: rows in date order until the total
+ * reaches `cap`; the row that crosses it is cut down to the remainder, later
+ * rows are dropped. A blank / invalid cap leaves the rows as they are.
+ */
+export function capReportRows(rows: ReportRow[], cap: string): ReportRow[] {
+  const max = Number(cap);
+  if (!cap.trim() || !(max >= 0)) return rows;
+  const out: ReportRow[] = [];
+  let qty = 0;
+  for (const r of rows) {
+    const left = Math.round((max - qty) * 1000) / 1000;
+    if (left <= 0) break;
+    const take = Math.min(r.movement.qtyOut, left);
+    out.push(
+      take === r.movement.qtyOut
+        ? r
+        : { ...r, movement: { ...r.movement, qtyOut: take } },
+    );
+    qty += take;
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* Workbook                                                            */
 /* ------------------------------------------------------------------ */
@@ -102,7 +126,6 @@ function ymd(iso: string): string {
 const PINK = "FFEAD1DC";
 const MAUVE = "FFD5A6BD";
 const PEACH = "FFF9CB9C";
-const CREAM = "FFFCE5CD";
 
 type Ctx = { r: ReportRow; i: number; item: string; maker: string };
 
@@ -125,32 +148,35 @@ const LAYOUTS: Record<ReportStyle, Column[]> = {
     { header: "تاريخ الفاتورة", width: 13, fill: PEACH, value: (c) => dmy(c.r.movement.docDate) },
     { header: "رقم الفاتورة", width: 13, fill: PEACH, value: (c) => num(c.r.movement.docNo) },
     { header: "اسم المؤسسة الصيدلية", width: 36, fill: PINK, value: (c) => c.r.branch.name },
-    { header: "عنوان المؤسسة بالتفصيل", width: 16, fill: PINK, value: () => "" },
+    { header: "عنوان المؤسسة بالتفصيل", width: 40, fill: PINK, value: (c) => c.r.branch.address },
     { header: "اسم المحافظة", width: 14, fill: PINK, value: (c) => c.r.branch.governorate },
     { header: "رقم الرخصة", width: 10, fill: PINK, value: (c) => c.r.branch.license },
     { header: "GLN (الكود المكانى للصيدلية)", width: 18, fill: PINK, value: (c) => c.r.branch.gln },
   ],
   averozolid: [
-    { header: "م", width: 6, fill: PINK, value: (c) => c.i + 1 },
-    { header: "اسم الفرع المورد", width: 24, fill: PINK, value: () => STORE_NAME },
     { header: "اسم الصنف", width: 28, fill: MAUVE, value: (c) => c.item },
-    { header: "الشركة صاحبة المستحضر", width: 20, fill: MAUVE, value: (c) => c.maker },
+    { header: "الشركة المنتجة / صاحبة المستحضر", width: 24, fill: MAUVE, value: (c) => c.maker },
     { header: "الكمية المباعة", width: 12, fill: PEACH, value: (c) => c.r.movement.qtyOut },
     { header: "تاريخ الفاتورة", width: 14, fill: PEACH, value: (c) => ymd(c.r.movement.docDate) },
     { header: "رقم الفاتورة", width: 14, fill: PEACH, value: (c) => num(c.r.movement.docNo) },
-    { header: "اسم المؤسسة الصيدلية", width: 44, fill: MAUVE, value: (c) => c.r.branch.name },
-    { header: "عنوان المؤسسة بالتفصيل", width: 16, fill: CREAM, value: () => "" },
+    { header: "اسم المؤسسة الصيدلية", width: 36, fill: MAUVE, value: (c) => c.r.branch.name },
+    { header: "عنوان المؤسسة بالتفصيل", width: 40, fill: PINK, value: (c) => c.r.branch.address },
     { header: "اسم المحافظة", width: 16, fill: MAUVE, value: (c) => c.r.branch.governorate },
+    { header: "الكود المكانى", width: 18, fill: PINK, value: (c) => num(c.r.branch.gln) },
+    { header: "Batch number", width: 13, fill: PINK, value: (c) => num(c.r.batch) },
   ],
 };
 
-/** Cell values of each report row, as they appear in the Excel sheet. */
+/**
+ * Cell values of each report row, as they appear in the Excel sheet, minus
+ * the م column (for pasting under existing rows in Google Sheets).
+ */
 export function reportRowValues(
   card: ParsedCard,
   rows: ReportRow[],
   { style, manufacturer }: ReportOptions,
 ): Cell[][] {
-  const columns = LAYOUTS[style];
+  const columns = LAYOUTS[style].filter((c) => c.header !== "م");
   const item = card.productName || card.itemName;
   return rows.map((r, i) =>
     columns.map((c) => c.value({ r, i, item, maker: manufacturer })),

@@ -15,8 +15,11 @@ import {
   type CardMovement,
   type ParsedCard,
 } from "./parseCard";
+import { isTransferCancel, TRANSFER_OUT } from "./report";
 
 export type HtmDoc = {
+  /** نوع الحركة of the file this document came from ("" if the header is missing). */
+  docType: string;
   docNo: string;
   /** ISO yyyy-mm-dd. */
   docDate: string;
@@ -61,6 +64,8 @@ export type ParsedHtm = {
   unknownRows: number;
   /** A few unrecognised rows' values, for diagnosis. */
   unknownSamples: string[][];
+  /** Item lines before any document header (the file's start is missing). */
+  orphanLines: number;
 };
 
 const CELL_RE = /<T([DH])([^>]*)>([^<]*)/gi;
@@ -128,6 +133,7 @@ class HtmParser {
     reportTotal: null,
     unknownRows: 0,
     unknownSamples: [],
+    orphanLines: 0,
   };
   private doc: HtmDoc | null = null;
 
@@ -148,6 +154,7 @@ class HtmParser {
         const party = normalizeArabic(vals[3]);
         const { area, name } = splitParty(party);
         this.doc = {
+          docType: this.result.movementType,
           docNo: vals[4],
           docDate: dt.date,
           time: dt.time,
@@ -182,6 +189,12 @@ class HtmParser {
       return;
     }
 
+    // Item line with no document above it: SofTech lost the file's beginning.
+    if (vals.length === 5 && !this.doc && NUM_RE.test(vals[0])) {
+      this.result.orphanLines++;
+      return;
+    }
+
     // Grand total: amount + label.
     if (vals.length === 2 && NUM_RE.test(vals[0])) {
       this.result.reportTotal = toNumber(vals[0]);
@@ -198,12 +211,16 @@ class HtmParser {
 
   /** Report header rows: "<value> <label>" pairs for period and movement type. */
   private headerRow(vals: string[]) {
+    // Labels compared without spaces / colons / hamza, so layout drift still matches.
+    const key = (s: string) => s.replace(/[\s:]+/g, "").replace(/[أإآ]/g, "ا");
+    const isLabel = (v: string | undefined, label: string) =>
+      v !== undefined && key(v) === key(label);
     const before = (label: string) => {
-      const i = vals.indexOf(label);
+      const i = vals.findIndex((v) => isLabel(v, label));
       return i > 0 ? vals[i - 1] : "";
     };
-    const from = vals.find((v, i) => DATE_RE.test(v) && vals[i + 1] === "خلال الفترة من");
-    const to = vals.find((v, i) => DATE_RE.test(v) && vals[i + 1] === "إلى");
+    const from = vals.find((v, i) => DATE_RE.test(v) && isLabel(vals[i + 1], "خلال الفترة من"));
+    const to = vals.find((v, i) => DATE_RE.test(v) && isLabel(vals[i + 1], "إلى"));
     if (from) this.result.from = isoDate(from);
     if (to) this.result.to = isoDate(to);
     const type = before("نوع الحركة");
@@ -247,7 +264,18 @@ export async function parseMovementHtm(
   feed(decoder.decode());
   if (tail.trim()) parser.row(tail);
   onProgress?.(1);
-  return parser.result;
+  const result = parser.result;
+  // No period in the header (file's start missing) → take it from the documents.
+  if (!result.from || !result.to) {
+    for (const item of result.items.values()) {
+      for (const l of item.lines) {
+        const d = l.doc.docDate;
+        if (!result.from || d < result.from) result.from = d;
+        if (!result.to || d > result.to) result.to = d;
+      }
+    }
+  }
+  return result;
 }
 
 /**
@@ -260,22 +288,28 @@ export function itemToCard(
   item: HtmItem,
   batch = "",
 ): ParsedCard {
-  const movements: CardMovement[] = item.lines.map((l) => ({
-    page: 1,
-    docDate: l.doc.docDate,
-    time: l.doc.time,
-    docType: htm.movementType,
-    docNo: l.doc.docNo,
-    party: l.doc.party,
-    partyArea: l.doc.partyArea,
-    partyName: l.doc.partyName,
-    expiry: "",
-    batch,
-    qtyIn: 0,
-    qtyOut: l.qty,
-    balance: 0,
-    user: l.doc.user,
-  }));
+  const movements: CardMovement[] = item.lines.map((l) => {
+    // No type found in the header → this page only takes transfer files, so assume one.
+    const docType = l.doc.docType || TRANSFER_OUT;
+    // A cancellation brings the qty back in, as on the PDF card.
+    const cancel = isTransferCancel(docType);
+    return {
+      page: 1,
+      docDate: l.doc.docDate,
+      time: l.doc.time,
+      docType,
+      docNo: l.doc.docNo,
+      party: l.doc.party,
+      partyArea: l.doc.partyArea,
+      partyName: l.doc.partyName,
+      expiry: "",
+      batch,
+      qtyIn: cancel ? l.qty : 0,
+      qtyOut: cancel ? 0 : l.qty,
+      balance: 0,
+      user: l.doc.user,
+    };
+  });
   return {
     code: item.code,
     itemName: item.itemName,
@@ -311,6 +345,7 @@ export function mergeHtms(files: ParsedHtm[]): MergedHtm {
     reportTotal: null,
     unknownRows: 0,
     unknownSamples: [],
+    orphanLines: 0,
   };
   const docOwner = new Map<string, number>();
   let duplicateLines = 0;
@@ -319,11 +354,12 @@ export function mergeHtms(files: ParsedHtm[]): MergedHtm {
     if (file.from && (!merged.from || file.from < merged.from)) merged.from = file.from;
     if (file.to && file.to > merged.to) merged.to = file.to;
     merged.unknownRows += file.unknownRows;
+    merged.orphanLines += file.orphanLines;
 
     for (const item of file.items.values()) {
       let target = merged.items.get(item.code);
       for (const line of item.lines) {
-        const key = `${line.doc.docNo}|${line.doc.docDate}`;
+        const key = `${line.doc.docType}|${line.doc.docNo}|${line.doc.docDate}`;
         const owner = docOwner.get(key);
         if (owner === undefined) {
           docOwner.set(key, fi);

@@ -7,6 +7,21 @@ export type ReportStyle = "gaptin" | "averozolid";
 export const TRANSFER_OUT = "صرف - تبادل بين الفروع";
 const TRANSFER_CANCEL = "إلغاء صرف - تبادل بين الفروع";
 
+/** Movement type without spacing / hamza drift ("صرف-تبادل بين  الفروع" still matches). */
+function typeKey(s: string): string {
+  return s.replace(/[\sـ]+/g, "").replace(/[أإآ]/g, "ا");
+}
+const OUT_KEY = typeKey(TRANSFER_OUT);
+const CANCEL_KEY = typeKey(TRANSFER_CANCEL);
+
+export function isTransferOut(docType: string): boolean {
+  return typeKey(docType) === OUT_KEY;
+}
+
+export function isTransferCancel(docType: string): boolean {
+  return typeKey(docType) === CANCEL_KEY;
+}
+
 const STORE_GLN = 6220002605773;
 const STORE_NAME = "مخزن الطرشوبي للادوية";
 
@@ -40,11 +55,11 @@ export function selectReportRows(
   // A cancel reverses the latest earlier transfer to the same party/quantity.
   const cancelled = new Set<number>();
   moves.forEach((m, i) => {
-    if (m.docType !== TRANSFER_CANCEL) return;
+    if (!isTransferCancel(m.docType)) return;
     for (let j = i - 1; j >= 0; j--) {
       const t = moves[j];
       if (
-        t.docType === TRANSFER_OUT &&
+        isTransferOut(t.docType) &&
         !cancelled.has(j) &&
         t.party === m.party &&
         t.qtyOut === m.qtyIn
@@ -60,7 +75,7 @@ export function selectReportRows(
   const perDay = new Map<string, Set<string>>();
 
   moves.forEach((m, i) => {
-    if (m.docType !== TRANSFER_OUT || cancelled.has(i)) return;
+    if (!isTransferOut(m.docType) || cancelled.has(i)) return;
     if (range.from && m.docDate < range.from) return;
     if (range.to && m.docDate > range.to) return;
     const branch = matchBranch(m.party, m.partyName);

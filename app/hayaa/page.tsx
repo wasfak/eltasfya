@@ -22,7 +22,7 @@ import {
   capReportRows,
   reportRowValues,
   selectReportRows,
-  TRANSFER_OUT,
+  isTransferOut,
   type ReportSelection,
   type ReportStyle,
 } from "@/lib/hayaa/report";
@@ -72,7 +72,7 @@ function formatDate(iso: string): string {
 function cardBatches(card: ParsedCard): Array<{ batch: string; qty: number }> {
   const qty = new Map<string, number>();
   for (const m of card.movements) {
-    if (m.docType !== TRANSFER_OUT) continue;
+    if (!isTransferOut(m.docType)) continue;
     qty.set(m.batch, (qty.get(m.batch) ?? 0) + m.qtyOut);
   }
   return [...qty].map(([batch, q]) => ({ batch, qty: q }));
@@ -307,7 +307,7 @@ export default function HayaaPage() {
 
   const visibleMovements = useMemo(() => {
     if (!selectedCard) return [];
-    return selectedCard.movements.filter((m) => m.docType === TRANSFER_OUT);
+    return selectedCard.movements.filter((m) => isTransferOut(m.docType));
   }, [selectedCard]);
 
   return (
@@ -439,7 +439,7 @@ export default function HayaaPage() {
               const card = state?.status === "done" ? state.card : null;
               const sel = selections[key];
               const transfers =
-                card?.movements.filter((m) => m.docType === TRANSFER_OUT)
+                card?.movements.filter((m) => isTransferOut(m.docType))
                   .length ?? 0;
               return (
                 <li

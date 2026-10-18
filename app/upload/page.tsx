@@ -50,8 +50,11 @@ import {
 import {
   buildReportWorkbook,
   capReportRows,
+  isTransferCancel,
+  isTransferOut,
   reportRowValues,
   selectReportRows,
+  TRANSFER_OUT,
 } from "@/lib/hayaa/report";
 import {
   playChime,
@@ -104,8 +107,12 @@ function fmt(n: number, digits = 0): string {
   });
 }
 
+/** Transferred qty, net of cancellations. */
 function itemQty(item: HtmItem): number {
-  return item.lines.reduce((s, l) => s + l.qty, 0);
+  return item.lines.reduce(
+    (s, l) => s + (isTransferCancel(l.doc.docType) ? -l.qty : l.qty),
+    0,
+  );
 }
 
 /** Item name without Arabic words, price tag or #..# markers. */
@@ -465,7 +472,17 @@ export default function UploadPage() {
       const rows = capReportRows(all.rows, caps[code] ?? "");
       const qty = rows.reduce((s, r) => s + r.movement.qtyOut, 0);
       const sel = { ...all, rows };
-      return [{ item, card, sel, qty, fullQty, batch }];
+      // Why a code with movements ends up with an empty sheet.
+      let emptyReason = "";
+      if (!all.rows.length && item.lines.length) {
+        if (!card.movements.some((m) => isTransferOut(m.docType))) {
+          const types = [...new Set(card.movements.map((m) => m.docType))].join("، ");
+          emptyReason = `نوع الحركة في الملف «${types}» — الشيت يأخذ فقط ${TRANSFER_OUT}`;
+        } else if (!all.unmatched.size) {
+          emptyReason = "لا توجد حركات في الفترة المختارة (أو كلها ملغاة)";
+        }
+      }
+      return [{ item, card, sel, qty, fullQty, batch, emptyReason }];
     });
   }, [htm, picked, batches, caps, settings]);
 
@@ -712,7 +729,7 @@ export default function UploadPage() {
           <ul className="divide-y divide-border rounded-lg border border-border">
             {files.map((s) => {
               // A totals gap comes from SofTech's own sums (shown below in grey), not from us.
-              const ok = s.htm.unknownRows === 0;
+              const ok = s.htm.unknownRows === 0 && s.htm.orphanLines === 0;
               return (
                 <li key={s.id} className="space-y-1 px-3 py-2 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
@@ -743,6 +760,13 @@ export default function UploadPage() {
                       <X />
                     </Button>
                   </div>
+                  {s.htm.orphanLines > 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      بداية الملف ناقصة من SofTech (أول مستند بدون تاريخ ولا فرع) —{" "}
+                      {fmt(s.htm.orphanLines)} سطر منه لن يدخل الشيت. صدّر الملف مرة
+                      أخرى لو محتاجه.
+                    </p>
+                  )}
                   {s.htm.unknownRows > 0 && (
                     <div className="space-y-0.5 text-xs text-red-600 dark:text-red-400">
                       <p className="font-medium">
@@ -1099,6 +1123,11 @@ export default function UploadPage() {
                             {companyOf(e.item.code)}
                           </span>
                         )}
+                        {e.emptyReason && (
+                          <p className="text-xs text-amber-600 dark:text-amber-400">
+                            {e.emptyReason}
+                          </p>
+                        )}
                         {e.sel.unmatched.size > 0 && (
                           <p className="text-xs text-amber-600 dark:text-amber-400">
                             غير موجود في ملف الفروع (لن يظهر في الشيت):{" "}
@@ -1294,7 +1323,16 @@ function ItemDetail({
                     <bdi>{l.doc.partyName}</bdi>
                   </td>
                   <td className="px-3 py-2 text-center font-semibold tabular-nums">
-                    {fmt(l.qty, 2)}
+                    {isTransferCancel(l.doc.docType) ? (
+                      <span
+                        className="text-red-600 dark:text-red-400"
+                        title={l.doc.docType}
+                      >
+                        إلغاء −{fmt(l.qty, 2)}
+                      </span>
+                    ) : (
+                      fmt(l.qty, 2)
+                    )}
                   </td>
                 </tr>
               );

@@ -1,6 +1,6 @@
 import ExcelJS from "exceljs";
 import type { CardMovement, ParsedCard } from "./parseCard";
-import { matchBranch, type Branch } from "./branches";
+import { EXCLUDED_LICENSES, matchBranch, type Branch } from "./branches";
 
 export type ReportStyle = "gaptin" | "averozolid";
 
@@ -83,6 +83,7 @@ export function selectReportRows(
       unmatched.set(m.party, (unmatched.get(m.party) ?? 0) + 1);
       return;
     }
+    if (EXCLUDED_LICENSES.has(branch.license)) return;
     const day = perDay.get(m.docDate) ?? new Set<string>();
     perDay.set(m.docDate, day);
     if (day.has(branch.license) || day.size >= maxPerDay) return;

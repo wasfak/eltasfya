@@ -121,6 +121,9 @@ export function nameKey(s: string): string {
     .trim();
 }
 
+/** Branches left out of the reports entirely: no rows, no copy, no totals. */
+export const EXCLUDED_LICENSES = new Set(["18"]); // الرحاب - مروه حسنى
+
 const byLicense = new Map(BRANCHES.map((b) => [b.license, b]));
 const aliasByKey = new Map(
   Object.entries(PARTY_ALIASES).map(([party, lic]) => [nameKey(party), lic]),

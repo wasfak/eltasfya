@@ -35,6 +35,12 @@ import {
   readFileAsArrayBuffer,
 } from "@/lib/tasfya/orderExcel";
 import { ProjectBar } from "@/components/tasfya/project-bar";
+import {
+  NoteButton,
+  NoteDialog,
+  NoteLine,
+  useNotes,
+} from "@/components/tasfya/notes";
 import type {
   OrderData,
   PurchaseLine,
@@ -431,6 +437,9 @@ export default function TasfyaPage() {
   // item code whose history is currently open (null = panel closed).
   const [allPurchases, setAllPurchases] = useState<PurchaseLine[]>([]);
   const [historyCode, setHistoryCode] = useState<string | null>(null);
+
+  // Per-code notes saved on this PC (IndexedDB), shared by every mode.
+  const { notes, noteCode, openNote, save: saveNote } = useNotes();
 
   // Currently loaded saved project (null = unsaved working state). `uploadKey`
   // remounts the file inputs so "New" visually clears the chosen files.
@@ -1414,6 +1423,11 @@ export default function TasfyaPage() {
                               <History className="size-4" />
                             </button>
                           )}
+                          <NoteButton
+                            code={row.code}
+                            note={notes[row.code]}
+                            onClick={() => openNote(row.code)}
+                          />
                           {alama && (
                             <span className="inline-flex rounded-full bg-purple-600 px-2 py-0.5 text-xs font-semibold text-white dark:bg-purple-500">
                               3alama
@@ -1423,6 +1437,12 @@ export default function TasfyaPage() {
                       </td>
                       <td className="px-4 py-3 text-center align-middle">
                         {row.name}
+                        {notes[row.code] && (
+                          <NoteLine
+                            note={notes[row.code]}
+                            onClick={() => openNote(row.code)}
+                          />
+                        )}
                       </td>
                       <td className="px-4 py-3 text-center align-middle">
                         {row.isExtra ? (
@@ -1735,6 +1755,17 @@ export default function TasfyaPage() {
             </div>
           );
         })()}
+
+      {/* Note editor: a free-text note for one item code, saved on this PC */}
+      {noteCode && (
+        <NoteDialog
+          code={noteCode}
+          name={allRows.find((r) => r.code === noteCode)?.name}
+          note={notes[noteCode]}
+          onSave={saveNote}
+          onClose={() => openNote(null)}
+        />
+      )}
 
       {/* Buy-history panel: an item's purchases over time, bonus per مورد */}
       {history && (

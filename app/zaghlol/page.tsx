@@ -20,6 +20,12 @@ import {
   type StockRow,
 } from "@/lib/tasfya/zaghlolStock";
 import { readFileAsArrayBuffer } from "@/lib/tasfya/orderExcel";
+import {
+  NoteButton,
+  NoteDialog,
+  NoteLine,
+  useNotes,
+} from "@/components/tasfya/notes";
 
 /** The CSV header holding the item code, matched against the stock sheet. */
 const CODE_KEY = "code";
@@ -67,6 +73,9 @@ export default function ZaghlolPage() {
   const [sort, setSort] = useState<{ col: string; dir: SortDir } | null>(null);
   // When on, hide متاح items that have no matching row in the CSV.
   const [matchedOnly, setMatchedOnly] = useState(false);
+
+  // Per-code notes saved on this PC — the same notes as the tasfya page.
+  const { notes, noteCode, openNote, save: saveNote } = useNotes();
 
   const canProcess = !!stockFile && !!csvFile;
 
@@ -383,13 +392,32 @@ export default function ZaghlolPage() {
                           key={col.key}
                           className="whitespace-nowrap px-4 py-2.5 text-center align-middle tabular-nums"
                         >
-                          {col.key === CODE_KEY && unmatched ? (
+                          {col.key === CODE_KEY ? (
                             <span className="inline-flex items-center gap-1.5">
                               {row.code}
-                              <span className="rounded-full bg-red-200 px-2 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/50 dark:text-red-200">
-                                no CSV
-                              </span>
+                              <NoteButton
+                                code={row.code}
+                                note={notes[row.code]}
+                                onClick={() => openNote(row.code)}
+                              />
+                              {unmatched && (
+                                <span className="rounded-full bg-red-200 px-2 py-0.5 text-xs font-medium text-red-800 dark:bg-red-900/50 dark:text-red-200">
+                                  no CSV
+                                </span>
+                              )}
                             </span>
+                          ) : col.key === NAME_KEY ? (
+                            <>
+                              {row.name || (
+                                <span className="text-muted-foreground/30">—</span>
+                              )}
+                              {notes[row.code] && (
+                                <NoteLine
+                                  note={notes[row.code]}
+                                  onClick={() => openNote(row.code)}
+                                />
+                              )}
+                            </>
                           ) : (
                             cellValue(row, col.key) || (
                               <span className="text-muted-foreground/30">—</span>
@@ -404,6 +432,16 @@ export default function ZaghlolPage() {
             </table>
           </div>
         </div>
+      )}
+
+      {noteCode && (
+        <NoteDialog
+          code={noteCode}
+          name={rows?.find((r) => r.code === noteCode)?.name}
+          note={notes[noteCode]}
+          onSave={saveNote}
+          onClose={() => openNote(null)}
+        />
       )}
     </div>
   );
